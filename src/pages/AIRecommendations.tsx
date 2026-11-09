@@ -83,7 +83,7 @@ export default function AIRecommendations({ go }: { go: (p: PageId) => void }) {
               </p>
             </div>
           </div>
-          <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+          <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
             {SUGGESTED_PROMPTS.map((p, i) => (
               <button key={p.workflow} onClick={() => ask(p.prompt)} disabled={thinking} className="group rounded-xl border border-line bg-white p-3 text-left transition hover:border-ai/50 hover:shadow-sm disabled:opacity-50">
                 <div className="text-[11px] font-semibold uppercase tracking-wide text-ai">

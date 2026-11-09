@@ -9,6 +9,8 @@ import {
   type InfraType,
   type InventoryRow,
 } from '../data/model'
+import { GPU_ANALYSIS, BOTTLENECK_FIX, type Bottleneck } from './gpu'
+import { GPU_RATE } from '../data/gpu'
 
 export interface Filters {
   region: string // 'all' or region id
@@ -247,7 +249,22 @@ export interface Opportunity {
   sources: string[]
 }
 
-export const RIGHTSIZE_TARGET = 0.65
+/** Default ceiling for surviving AZs during a single-AZ failure. */
+export const FAILOVER_CEILING = 0.9
+/**
+ * Rightsizing target by tier. Tier 0 must survive losing one of three AZs at the failover ceiling,
+ * so its steady-state target is ceiling × 2/3 = 60%. Tier 1/2 can degrade or defer during an AZ event.
+ */
+export const rightsizeTarget = (tier: string) => (tier === 'Tier 0' ? +(FAILOVER_CEILING * (2 / 3)).toFixed(2) : 0.65)
+const RIGHTSIZE_HOW: Record<string, string> = {
+  'data-platform': 'shift backfills to off-peak windows and bin-pack Spark executors',
+  media: 'bin-pack resize / transcode workers and autoscale on queue depth',
+  'home-feed': 'autoscale to the diurnal traffic curve instead of a flat peak floor',
+  search: 'autoscale per region and lower the floor outside regional peak hours',
+  ads: 'autoscale on auction QPS and right-size instance shape',
+  'core-api': 'lower the autoscaling floor while keeping N+1 AZ headroom',
+  'ml-training': 'consolidate inference replicas and batch requests',
+}
 const FEAS_BY_EFFORT: Record<Level, number> = { Low: 0.9, Medium: 0.7, High: 0.45 }
 const RISK_PENALTY: Record<Level, number> = { Low: 1, Medium: 0.9, High: 0.75 }
 export const LOW_CONFIDENCE = 0.6
@@ -282,7 +299,8 @@ function buildOpportunities(): Opportunity[] {
     if (util >= 0.58) continue
     const w = workloadById(r.workload)
     const reg = regionById(r.region)
-    const targetProv = Math.ceil(r.used / RIGHTSIZE_TARGET)
+    const target = rightsizeTarget(w.tier)
+    const targetProv = Math.ceil(r.used / target)
     const reducible = r.provisioned - targetProv
     const unitCost = r.monthlyCost / r.provisioned
     const savings = reducible * unitCost * 0.85
@@ -302,7 +320,7 @@ function buildOpportunities(): Opportunity[] {
         currentConfig: `${r.provisioned.toLocaleString()} units of ${r.hardware} across ${r.az}`,
         observedUtil: `CPU p95 ${pctS(r.cpuUtil)}, memory ${pctS(r.memUtil)}, allocation ${pctS(util)}`,
         observedUtilValue: util,
-        proposed: `Consolidate to ${targetProv.toLocaleString()} units (target ${RIGHTSIZE_TARGET * 100}% utilization); release ${reducible.toLocaleString()} units via autoscaling floor + bin-packing`,
+        proposed: `Consolidate to ${targetProv.toLocaleString()} units (target ${Math.round(target * 100)}% utilization${tier0 ? ', N+1-safe' : ''}); ${RIGHTSIZE_HOW[r.workload]}; release ${reducible.toLocaleString()} units`,
         monthlySavings: Math.round(savings),
         effort,
         risk: tier0 ? 'Medium' : 'Low',
@@ -313,7 +331,7 @@ function buildOpportunities(): Opportunity[] {
         confidence: Math.max(0.4, 0.95 - r.utilVolatility * 2.2),
         calc: [
           { label: 'Current utilization', formula: `${r.used.toLocaleString()} used ÷ ${r.provisioned.toLocaleString()} provisioned`, result: pctS(util) },
-          { label: 'Target capacity', formula: `ceil(${r.used.toLocaleString()} ÷ ${RIGHTSIZE_TARGET})`, result: `${targetProv.toLocaleString()} units` },
+          { label: 'Target capacity', formula: `ceil(${r.used.toLocaleString()} ÷ ${target}) — ${tier0 ? `Tier 0 target = ${FAILOVER_CEILING * 100}% failover ceiling × 2/3 surviving AZs` : 'Tier 1/2 target 65%'}`, result: `${targetProv.toLocaleString()} units` },
           { label: 'Unit cost', formula: `${usd(r.monthlyCost)} ÷ ${r.provisioned.toLocaleString()} units`, result: `${usd(unitCost)}/unit/mo` },
           { label: 'Monthly savings', formula: `${reducible.toLocaleString()} units × ${usd(unitCost)} × 0.85 (reservation & overhead haircut)`, result: usd(savings) },
           { label: 'Confidence', formula: `0.95 − 2.2 × 90-day utilization volatility (${pctS(r.utilVolatility)})`, result: Math.max(0.4, 0.95 - r.utilVolatility * 2.2).toFixed(2) },
@@ -366,7 +384,43 @@ function buildOpportunities(): Opportunity[] {
   }
 
   // C. Networking inefficiency
-  for (const r of INVENTORY.filter((x) => x.type === 'network')) {
+  // Image serving: origin egress is cut by CDN cache-hit and smaller image formats, not by shrinking links.
+  for (const r of INVENTORY.filter((x) => x.type === 'network' && x.workload === 'media')) {
+    const reg = regionById(r.region)
+    const hitBefore = 0.88
+    const hitAfter = 0.94
+    const bytesCut = 0.25
+    const originShare = (1 - hitAfter) / (1 - hitBefore) * (1 - bytesCut)
+    const savings = r.monthlyCost * (1 - originShare) * 0.55
+    if (savings < 5000) continue
+    opps.push(
+      finalize({
+        id: `opp-cdn-${r.region}`,
+        category: 'Networking inefficiency',
+        title: `Raise CDN cache-hit & serve AVIF/WebP for Image Serving in ${reg.name}`,
+        region: r.region,
+        workloads: ['media'],
+        type: 'network',
+        rowIds: [r.id],
+        currentConfig: `${r.provisioned} Gbps ${r.hardware}; CDN cache-hit ${pctS(hitBefore)}; JPEG-heavy derivatives`,
+        observedUtil: `Origin egress ${pctS(r.used / r.provisioned)} of provisioned; ${pctS(1 - hitBefore)} of image requests miss the CDN`,
+        observedUtilValue: r.used / r.provisioned,
+        proposed: `Tiered caching + longer TTLs for immutable Pin images (hit ${pctS(hitBefore)} → ${pctS(hitAfter)}); serve AVIF/WebP derivatives (~${bytesCut * 100}% fewer bytes)`,
+        monthlySavings: Math.round(savings),
+        effort: 'Medium',
+        risk: 'Low',
+        customerImpact: 'Low',
+        considerations: 'Images also load faster for users. Needs a one-time re-encode backfill (CPU), visual-quality checks (SSIM), and JPEG fallback for older clients.',
+        confidence: 0.8,
+        calc: [
+          { label: 'Origin traffic after', formula: `(1 − ${hitAfter}) ÷ (1 − ${hitBefore}) × (1 − ${bytesCut})`, result: pctS(originShare) },
+          { label: 'Monthly savings', formula: `${usd(r.monthlyCost)} × (1 − ${pctS(originShare)}) × 0.55 (committed-egress & CDN fee offset)`, result: usd(savings) },
+        ],
+        sources: ['CDN logs (cache-hit, bytes served)', 'Flow telemetry (origin egress)', 'Billing: egress'],
+      }),
+    )
+  }
+  for (const r of INVENTORY.filter((x) => x.type === 'network' && x.workload !== 'media')) {
     const util = r.used / r.provisioned
     if (util >= 0.42) continue
     const w = workloadById(r.workload)
@@ -463,6 +517,43 @@ function buildOpportunities(): Opportunity[] {
     )
   }
 
+  // A (GPU). Underutilized GPUs: allocated but doing little useful work.
+  const GPU_META: Partial<Record<Bottleneck, { short: string; effort: Level; risk: Level; conf: number }>> = {
+    'Idle reservation': { short: 'Reclaim idle notebook GPUs', effort: 'Low', risk: 'Low', conf: 0.86 },
+    'Unbatched requests': { short: 'Enable dynamic batching', effort: 'Medium', risk: 'Medium', conf: 0.76 },
+    'Input pipeline stall': { short: 'Fix input-pipeline stalls', effort: 'Medium', risk: 'Low', conf: 0.8 },
+    'Poor multi-GPU scaling': { short: 'Right-size GPU count', effort: 'Low', risk: 'Low', conf: 0.72 },
+    'Underfilled GPU': { short: 'Batch / pack underfilled GPUs', effort: 'Medium', risk: 'Low', conf: 0.7 },
+  }
+  for (const j of GPU_ANALYSIS) {
+    const meta = GPU_META[j.bottleneck]
+    if (!meta || j.savings < 5000) continue
+    const reg = regionById(j.region)
+    opps.push(
+      finalize({
+        id: `opp-gpu-${j.id}`,
+        category: 'Underutilized compute',
+        title: `${meta.short}: ${j.name} (${reg.name})`,
+        region: j.region,
+        workloads: ['ml-training'],
+        type: 'compute',
+        rowIds: [`${j.region}:ml-training:compute`],
+        currentConfig: `${j.kind === 'Training' ? `${j.gpus} × ${GPU_RATE.Training.type} per run, ${j.runsPerMonth} runs/mo` : `${j.gpus} × ${GPU_RATE.Inference.type} replicas`}; ${Math.round(j.gpuHours).toLocaleString()} GPU-hrs/mo`,
+        observedUtil: `GPU SM ${pctS(j.smUtil)}, GPU memory ${pctS(j.memUtil)}, data-wait ${pctS(j.dataWait)}`,
+        observedUtilValue: j.smUtil,
+        proposed: BOTTLENECK_FIX[j.bottleneck],
+        monthlySavings: Math.round(j.savings),
+        effort: meta.effort,
+        risk: meta.risk,
+        customerImpact: j.kind === 'Inference' ? 'Medium' : 'Low',
+        considerations: j.tradeoff,
+        confidence: meta.conf,
+        calc: j.calc,
+        sources: ['GPU telemetry (30-day SM / memory)', 'Scheduler logs', 'Billing: GPU spend'],
+      }),
+    )
+  }
+
   return opps.sort((a, b) => b.priority - a.priority)
 }
 
@@ -499,9 +590,10 @@ export function regionComputeBaseline(regionId: string) {
   const unitCost = sum(rows, 'monthlyCost') / provisioned
   const aiRows = rows.filter((r) => workloadById(r.workload).isAI)
   const aiShare = sum(aiRows, 'used') / used
-  const reclaimable = OPPORTUNITIES.filter((o) => o.region === regionId && o.category === 'Underutilized compute').reduce((s, o) => {
+  // Only fleet rightsizing frees schedulable units; GPU fixes free GPU-hours inside the AI pool instead.
+  const reclaimable = OPPORTUNITIES.filter((o) => o.region === regionId && o.id.startsWith('opp-cmp-')).reduce((s, o) => {
     const r = rows.find((x) => x.id === o.rowIds[0])!
-    return s + (r.provisioned - Math.ceil(r.used / RIGHTSIZE_TARGET))
+    return s + Math.max(0, r.provisioned - Math.ceil(r.used / rightsizeTarget(workloadById(r.workload).tier)))
   }, 0)
   return { provisioned, used, growth, unitCost, aiShare, reclaimable, leadTime: regionById(regionId).leadTimeMonths }
 }
@@ -545,4 +637,120 @@ export function scenarioComparison(regionId: string, horizon: number, threshold:
     const r = simulate({ region: regionId, demandAdj: 0, growth: s.growth, threshold, horizon, optimizeFirst: s.optimizeFirst })
     return { ...s, ...r }
   })
+}
+
+/* ------------------------------------------------------------------ */
+/* Availability-zone failover                                          */
+/* ------------------------------------------------------------------ */
+
+export type ProtectScope = 'tier0' | 'tier01' | 'all'
+export const PROTECT_LABEL: Record<ProtectScope, string> = { tier0: 'Tier 0 only', tier01: 'Tier 0 + Tier 1', all: 'All workloads' }
+const isProtected = (tier: string, scope: ProtectScope) => scope === 'all' || tier === 'Tier 0' || (scope === 'tier01' && tier === 'Tier 1')
+
+export type FailoverSeverity = 'ok' | 'outage' | 'degraded' | 'deferrable'
+export const SEVERITY_LABEL: Record<FailoverSeverity, string> = { ok: 'Fits', outage: 'Outage risk', degraded: 'Degraded', deferrable: 'Deferrable (batch)' }
+
+export interface FailoverInput {
+  region: string
+  failedAz: string
+  ceiling: number
+  protect: ProtectScope
+  workload?: string
+}
+
+export interface PoolResult {
+  workload: string
+  name: string
+  tier: string
+  displaced: number
+  survivorSpare: number
+  absorbed: number
+  shortfall: number
+  postUtil: number
+  severity: FailoverSeverity
+  protected: boolean
+  unitsNeeded: number
+}
+
+export function simulateFailover(input: FailoverInput) {
+  const reg = regionById(input.region)
+  const rows = INVENTORY.filter((r) => r.region === input.region && r.type === 'compute' && (!input.workload || input.workload === 'all' || r.workload === input.workload))
+  const survivors = reg.azs.filter((a) => a !== input.failedAz)
+  const absorbedByAz: Record<string, number> = Object.fromEntries(survivors.map((a) => [a, 0]))
+
+  const pools: PoolResult[] = rows.map((r) => {
+    const w = workloadById(r.workload)
+    const slices = r.azSplit!
+    const failed = slices.find((s) => s.az === input.failedAz)!
+    const surv = slices.filter((s) => s.az !== input.failedAz)
+    // Displaced load can only land in the same hardware pool, and only up to the failover ceiling.
+    const spare = surv.map((s) => Math.max(0, input.ceiling * s.provisioned - s.used))
+    const totalSpare = spare.reduce((a, b) => a + b, 0)
+    const absorbed = Math.min(failed.used, totalSpare)
+    surv.forEach((s, i) => (absorbedByAz[s.az] += totalSpare ? (absorbed * spare[i]) / totalSpare : 0))
+    const shortfall = failed.used - absorbed
+    const survProv = surv.reduce((a, s) => a + s.provisioned, 0)
+    const postUtil = (surv.reduce((a, s) => a + s.used, 0) + failed.used) / survProv
+    const prot = isProtected(w.tier, input.protect)
+    const severity: FailoverSeverity = shortfall < 1 ? 'ok' : w.tier === 'Tier 0' ? 'outage' : w.tier === 'Tier 1' ? 'degraded' : 'deferrable'
+    return {
+      workload: r.workload,
+      name: w.short,
+      tier: w.tier,
+      displaced: failed.used,
+      survivorSpare: totalSpare,
+      absorbed,
+      shortfall,
+      postUtil,
+      severity,
+      protected: prot,
+      // Extra capacity in surviving AZs so the shortfall fits under the ceiling.
+      unitsNeeded: prot && shortfall >= 1 ? Math.ceil(shortfall / input.ceiling) : 0,
+    }
+  })
+
+  const azs = reg.azs.map((az) => {
+    const prov = rows.reduce((s, r) => s + r.azSplit!.find((x) => x.az === az)!.provisioned, 0)
+    const used = rows.reduce((s, r) => s + r.azSplit!.find((x) => x.az === az)!.used, 0)
+    const failed = az === input.failedAz
+    const absorbed = failed ? 0 : absorbedByAz[az]
+    return { az, failed, provisioned: prov, used, before: prov ? used / prov : 0, after: failed ? 0 : prov ? (used + absorbed) / prov : 0, absorbed }
+  })
+
+  const totalProv = azs.reduce((s, a) => s + a.provisioned, 0)
+  const totalUsed = azs.reduce((s, a) => s + a.used, 0)
+  const failedAz = azs.find((a) => a.failed)!
+  const survProv = totalProv - failedAz.provisioned
+  // Fungible view: pretends any surviving capacity can run any workload.
+  const fungibleUtil = totalUsed / survProv
+  const fungibleShortfall = Math.max(0, totalUsed - input.ceiling * survProv)
+  const shortfall = pools.reduce((s, p) => s + p.shortfall, 0)
+  const unitsNeeded = pools.reduce((s, p) => s + p.unitsNeeded, 0)
+  const unitCost = rows.reduce((s, r) => s + r.monthlyCost, 0) / Math.max(1, totalProv)
+  const failedShare = failedAz.provisioned / totalProv
+  return {
+    region: reg,
+    failedAz: input.failedAz,
+    pools,
+    azs,
+    aggregateUtil: totalUsed / totalProv,
+    fungibleUtil,
+    fungibleShortfall,
+    displaced: failedAz.used,
+    shortfall,
+    unitsNeeded,
+    monthlyInvestment: unitsNeeded * unitCost,
+    unitCost,
+    sufficient: unitsNeeded === 0,
+    failedShare,
+    /** Highest steady-state utilization that still survives losing this AZ (perfectly fungible capacity). */
+    maxSteadyUtil: input.ceiling * (1 - failedShare),
+  }
+}
+
+export type FailoverResult = ReturnType<typeof simulateFailover>
+
+export function worstCaseFailover(region: string, ceiling = FAILOVER_CEILING, protect: ProtectScope = 'tier01', workload?: string) {
+  const all = regionById(region).azs.map((az) => simulateFailover({ region, failedAz: az, ceiling, protect, workload }))
+  return all.reduce((worst, r) => (r.unitsNeeded > worst.unitsNeeded || (r.unitsNeeded === worst.unitsNeeded && r.shortfall > worst.shortfall) ? r : worst), all[0])
 }

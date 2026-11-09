@@ -48,7 +48,7 @@ interface PersistedState {
   audit: AuditEntry[]
 }
 
-const STORAGE_KEY = 'infra-control-tower-v1'
+const STORAGE_KEY = 'infra-control-tower-v2'
 
 function seedAudit(): AuditEntry[] {
   const ts = (daysAgo: number, h: number) => {

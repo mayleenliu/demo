@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { LayoutDashboard, Gauge, PiggyBank, Sparkles, KanbanSquare, ShieldCheck, RotateCcw, Menu, X, FlaskConical } from 'lucide-react'
+import { LayoutDashboard, Gauge, PiggyBank, Cpu, Sparkles, KanbanSquare, ShieldCheck, RotateCcw, Menu, X, FlaskConical } from 'lucide-react'
 import { AS_OF_LABEL, INFRA_TYPES, REGIONS, WORKLOADS } from './data/model'
 import { DEFAULT_FILTERS } from './lib/calc'
 import { ROLES, useStore, type Role } from './state/store'
@@ -9,14 +9,16 @@ import Capacity from './pages/Capacity'
 import CostOptimization from './pages/CostOptimization'
 import AIRecommendations from './pages/AIRecommendations'
 import ProgramExecution from './pages/ProgramExecution'
+import GpuEfficiency from './pages/GpuEfficiency'
 import Governance from './pages/Governance'
 
-export type PageId = 'overview' | 'capacity' | 'cost' | 'ai' | 'program' | 'governance'
+export type PageId = 'overview' | 'capacity' | 'cost' | 'gpu' | 'ai' | 'program' | 'governance'
 
 const NAV: { id: PageId; label: string; icon: typeof Gauge; title: string; subtitle: string }[] = [
   { id: 'overview', label: 'Executive Overview', icon: LayoutDashboard, title: 'Executive Overview', subtitle: 'Fleet-wide capacity, spend and efficiency at a glance' },
   { id: 'capacity', label: 'Capacity & Utilization', icon: Gauge, title: 'Capacity & Utilization', subtitle: 'Inventory, utilization, headroom and forecasting simulator' },
   { id: 'cost', label: 'Cost Optimization', icon: PiggyBank, title: 'Cost Optimization & FinOps', subtitle: 'Detected inefficiencies, prioritization and approval workflow' },
+  { id: 'gpu', label: 'GPU Efficiency', icon: Cpu, title: 'AI / GPU Efficiency', subtitle: 'GPU utilization, idle time, training-job economics and scheduling' },
   { id: 'ai', label: 'AI Recommendations', icon: Sparkles, title: 'AI Recommendations Engine', subtitle: 'Grounded analysis with inspectable sources, calculations and confidence' },
   { id: 'program', label: 'Program Execution', icon: KanbanSquare, title: 'Program Execution', subtitle: 'Initiatives, milestones, dependencies and the TPM assistant' },
   { id: 'governance', label: 'AI Governance', icon: ShieldCheck, title: 'AI Governance & Audit', subtitle: 'Traceability, human review and access controls for AI output' },
@@ -115,6 +117,7 @@ export default function App() {
           {page === 'overview' && <Overview go={go} />}
           {page === 'capacity' && <Capacity />}
           {page === 'cost' && <CostOptimization go={go} />}
+          {page === 'gpu' && <GpuEfficiency go={go} />}
           {page === 'ai' && <AIRecommendations go={go} />}
           {page === 'program' && <ProgramExecution />}
           {page === 'governance' && <Governance />}

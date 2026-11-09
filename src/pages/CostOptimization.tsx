@@ -1,8 +1,8 @@
 import { useMemo, useState } from 'react'
 import { CartesianGrid, Cell, ResponsiveContainer, Scatter, ScatterChart, Tooltip, XAxis, YAxis, ZAxis, ReferenceArea, Bar, BarChart } from 'recharts'
 import { ArrowRight, Calculator, Check, ChevronRight, Lock, Plus, ShieldAlert } from 'lucide-react'
-import { regionById, workloadById } from '../data/model'
-import { filterOpps, LOW_CONFIDENCE, OPP_STATUSES, type OppCategory, type OppStatus } from '../lib/calc'
+import { WORKLOADS, regionById, workloadById } from '../data/model'
+import { filterOpps, filterRows, sum, LOW_CONFIDENCE, OPP_STATUSES, type OppCategory, type OppStatus } from '../lib/calc'
 import { fmtPct, fmtUSD } from '../lib/format'
 import { useOpportunities, useStore, type OppWithStatus } from '../state/store'
 import { Badge, Button, Card, CardTitle, CHART, Drawer, Kpi, LowConfidenceTag, MeasuredTag, Segmented, Td, Th, statusTone, cx, AITag } from '../components/ui'
@@ -54,6 +54,8 @@ export default function CostOptimization({ go }: { go: (p: PageId) => void }) {
         <Kpi label="Awaiting review" value={scoped.filter((o) => o.status === 'Proposed' || o.status === 'Under Review').length} sub={<span>Proposed + Under Review</span>} />
         <Kpi label="Low-confidence flags" value={low.length} sub={<span>confidence &lt; {LOW_CONFIDENCE * 100}% · {fmtUSD(low.reduce((s, o) => s + o.monthlySavings, 0))}/mo</span>} tone={low.length ? 'red' : 'neutral'} />
       </div>
+
+      <WorkloadEconomics scoped={scoped} />
 
       <div className="grid gap-4 xl:grid-cols-5">
         <Card className="xl:col-span-3">
@@ -404,5 +406,61 @@ export function OpportunityDrawer({ opp, onClose, go }: { opp: OppWithStatus | n
         </div>
       </div>
     </Drawer>
+  )
+}
+
+function WorkloadEconomics({ scoped }: { scoped: OppWithStatus[] }) {
+  const { filters } = useStore()
+  const rows = WORKLOADS.filter((w) => filters.workload === 'all' || w.id === filters.workload).map((w) => {
+    const all = filterRows({ ...filters, workload: w.id, type: 'all' })
+    const compute = all.filter((r) => r.type === 'compute')
+    const open = scoped.filter((o) => o.workloads.includes(w.id) && o.status !== 'Completed')
+    return { w, spend: sum(all, 'monthlyCost'), util: sum(compute, 'used') / Math.max(1, sum(compute, 'provisioned')), savings: open.reduce((s, o) => s + o.monthlySavings / o.workloads.length, 0), count: open.length }
+  })
+  const total = rows.reduce((s, r) => s + r.spend, 0)
+  return (
+    <Card pad={false}>
+      <div className="p-5 pb-3">
+        <h3 className="text-[15px] font-semibold">Workload economics</h3>
+        <p className="text-xs text-muted">How each product workload drives infrastructure cost, and the lever that moves it. Spend covers compute, storage and network in the current filter scope. Savings shared across several workloads are split evenly between them</p>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[1000px]">
+          <thead>
+            <tr>
+              <Th className="pl-5">Workload</Th>
+              <Th>Infrastructure challenge</Th>
+              <Th>Optimization lever</Th>
+              <Th className="text-right">Spend / mo</Th>
+              <Th className="text-right">Share</Th>
+              <Th className="text-right">Compute util</Th>
+              <Th className="pr-5 text-right">Open savings</Th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(({ w, spend, util, savings, count }) => (
+              <tr key={w.id} className="hover:bg-neutral-50">
+                <Td className="pl-5">
+                  <div className="flex items-center gap-2 font-medium">
+                    {w.name}
+                    <Badge tone={w.tier === 'Tier 0' ? 'red' : w.tier === 'Tier 1' ? 'amber' : 'neutral'}>{w.tier}</Badge>
+                  </div>
+                  <div className="text-[11px] text-muted">{w.productRole}</div>
+                </Td>
+                <Td className="max-w-[260px] text-xs text-ink-2">{w.challenge}</Td>
+                <Td className="max-w-[240px] text-xs font-medium">{w.lever}</Td>
+                <Td className="tabular text-right font-semibold">{fmtUSD(spend)}</Td>
+                <Td className="tabular text-right text-muted">{fmtPct(spend / Math.max(1, total), 0)}</Td>
+                <Td className="tabular text-right">{fmtPct(util, 0)}</Td>
+                <Td className="tabular pr-5 text-right">
+                  <span className="font-semibold">{savings ? fmtUSD(savings) : '—'}</span>
+                  {count > 0 && <span className="block text-[11px] text-muted">{count} opportunit{count > 1 ? 'ies' : 'y'}</span>}
+                </Td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </Card>
   )
 }

@@ -16,6 +16,10 @@ export interface Region {
   capacityStep: { monthsAgo: number; added: number } | null
   /** Procurement lead time in months for new capacity. */
   leadTimeMonths: number
+  /** Share of each pool's provisioned compute placed in each AZ (same order as azs). */
+  azWeights: number[]
+  /** Per-AZ utilization skew relative to the pool average (load is rarely balanced). */
+  azSkew: number[]
 }
 
 export interface Workload {
@@ -32,6 +36,18 @@ export interface Workload {
   storageWeight: number
   networkWeight: number
   isAI: boolean
+  /** Why this workload matters to the business. */
+  productRole: string
+  /** Dominant infrastructure cost / capacity challenge. */
+  challenge: string
+  /** Primary optimization levers. */
+  lever: string
+}
+
+export interface AzSlice {
+  az: string
+  provisioned: number
+  used: number
 }
 
 export interface InventoryRow {
@@ -55,6 +71,8 @@ export interface InventoryRow {
   utilVolatility: number
   /** Storage only: share of bytes not accessed in 90 days. */
   coldPct: number
+  /** Compute only: how the pool is spread across availability zones. */
+  azSplit?: AzSlice[]
 }
 
 export const AS_OF = new Date('2026-11-09T12:00:00')
@@ -62,21 +80,21 @@ export const AS_OF_LABEL = 'Nov 9, 2026'
 export const CAPACITY_THRESHOLD = 0.85
 
 export const REGIONS: Region[] = [
-  { id: 'us-east', name: 'US East', azs: ['use-az1', 'use-az2', 'use-az4'], computeProv: 10000, computeUsed: 7200, monthlySpend: 1_200_000, monthlyBudget: 1_150_000, growth: 0.03, capacityStep: { monthsAgo: 5, added: 0.12 }, leadTimeMonths: 3 },
-  { id: 'us-west', name: 'US West', azs: ['usw-az1', 'usw-az2', 'usw-az3'], computeProv: 8000, computeUsed: 4800, monthlySpend: 950_000, monthlyBudget: 990_000, growth: 0.014, capacityStep: { monthsAgo: 10, added: 0.1 }, leadTimeMonths: 3 },
-  { id: 'eu-west', name: 'EU West', azs: ['euw-az1', 'euw-az2', 'euw-az3'], computeProv: 6000, computeUsed: 5400, monthlySpend: 800_000, monthlyBudget: 760_000, growth: 0.022, capacityStep: null, leadTimeMonths: 4 },
-  { id: 'eu-central', name: 'EU Central', azs: ['euc-az1', 'euc-az2', 'euc-az3'], computeProv: 5000, computeUsed: 3000, monthlySpend: 650_000, monthlyBudget: 680_000, growth: 0.011, capacityStep: null, leadTimeMonths: 4 },
-  { id: 'ap-southeast', name: 'AP Southeast', azs: ['aps-az1', 'aps-az2', 'aps-az3'], computeProv: 4000, computeUsed: 2200, monthlySpend: 500_000, monthlyBudget: 470_000, growth: 0.038, capacityStep: { monthsAgo: 8, added: 0.2 }, leadTimeMonths: 5 },
+  { id: 'us-east', name: 'US East', azs: ['use-az1', 'use-az2', 'use-az4'], computeProv: 10000, computeUsed: 7200, monthlySpend: 1_200_000, monthlyBudget: 1_150_000, growth: 0.03, capacityStep: { monthsAgo: 5, added: 0.12 }, leadTimeMonths: 3, azWeights: [0.4, 0.32, 0.28], azSkew: [1.12, 0.93, 0.9] },
+  { id: 'us-west', name: 'US West', azs: ['usw-az1', 'usw-az2', 'usw-az3'], computeProv: 8000, computeUsed: 4800, monthlySpend: 950_000, monthlyBudget: 990_000, growth: 0.014, capacityStep: { monthsAgo: 10, added: 0.1 }, leadTimeMonths: 3, azWeights: [0.34, 0.33, 0.33], azSkew: [1.02, 1.0, 0.98] },
+  { id: 'eu-west', name: 'EU West', azs: ['euw-az1', 'euw-az2', 'euw-az3'], computeProv: 6000, computeUsed: 5400, monthlySpend: 800_000, monthlyBudget: 760_000, growth: 0.022, capacityStep: null, leadTimeMonths: 4, azWeights: [0.36, 0.34, 0.3], azSkew: [1.02, 1.0, 0.97] },
+  { id: 'eu-central', name: 'EU Central', azs: ['euc-az1', 'euc-az2', 'euc-az3'], computeProv: 5000, computeUsed: 3000, monthlySpend: 650_000, monthlyBudget: 680_000, growth: 0.011, capacityStep: null, leadTimeMonths: 4, azWeights: [0.34, 0.33, 0.33], azSkew: [1.55, 0.74, 0.72] },
+  { id: 'ap-southeast', name: 'AP Southeast', azs: ['aps-az1', 'aps-az2', 'aps-az3'], computeProv: 4000, computeUsed: 2200, monthlySpend: 500_000, monthlyBudget: 470_000, growth: 0.038, capacityStep: { monthsAgo: 8, added: 0.2 }, leadTimeMonths: 5, azWeights: [0.5, 0.3, 0.2], azSkew: [1.08, 0.94, 0.9] },
 ]
 
 export const WORKLOADS: Workload[] = [
-  { id: 'home-feed', name: 'Home Feed Ranking', short: 'Home Feed', weight: 0.2, util: 0.78, growthAdj: 0.003, tier: 'Tier 0', reservedRatio: 0.82, priceFactor: 1.1, coldDataPct: 0.18, storageWeight: 0.12, networkWeight: 0.2, isAI: false },
-  { id: 'search', name: 'Search & Discovery', short: 'Search', weight: 0.13, util: 0.7, growthAdj: 0.002, tier: 'Tier 0', reservedRatio: 0.8, priceFactor: 1.0, coldDataPct: 0.22, storageWeight: 0.1, networkWeight: 0.14, isAI: false },
-  { id: 'ads', name: 'Ads Serving', short: 'Ads', weight: 0.16, util: 0.8, growthAdj: 0.005, tier: 'Tier 0', reservedRatio: 0.85, priceFactor: 1.05, coldDataPct: 0.2, storageWeight: 0.1, networkWeight: 0.18, isAI: false },
-  { id: 'ml-training', name: 'ML Training & Inference (AI)', short: 'AI / ML', weight: 0.17, util: 0.86, growthAdj: 0.016, tier: 'Tier 1', reservedRatio: 0.78, priceFactor: 2.6, coldDataPct: 0.34, storageWeight: 0.16, networkWeight: 0.16, isAI: true },
-  { id: 'media', name: 'Image & Video Processing', short: 'Media', weight: 0.12, util: 0.5, growthAdj: 0.0, tier: 'Tier 1', reservedRatio: 0.8, priceFactor: 1.2, coldDataPct: 0.56, storageWeight: 0.28, networkWeight: 0.12, isAI: false },
-  { id: 'data-platform', name: 'Data Platform (Batch / Spark)', short: 'Data Platform', weight: 0.14, util: 0.4, growthAdj: -0.002, tier: 'Tier 2', reservedRatio: 0.76, priceFactor: 0.9, coldDataPct: 0.62, storageWeight: 0.18, networkWeight: 0.1, isAI: false },
-  { id: 'core-api', name: 'Core API & Services', short: 'Core API', weight: 0.08, util: 0.6, growthAdj: 0.001, tier: 'Tier 0', reservedRatio: 0.84, priceFactor: 1.0, coldDataPct: 0.15, storageWeight: 0.06, networkWeight: 0.1, isAI: false },
+  { id: 'home-feed', name: 'Home Feed Ranking', short: 'Home Feed', weight: 0.2, util: 0.78, growthAdj: 0.003, tier: 'Tier 0', reservedRatio: 0.82, priceFactor: 1.1, coldDataPct: 0.18, storageWeight: 0.12, networkWeight: 0.2, isAI: false, productRole: 'Primary discovery surface; every app open triggers ranking', challenge: 'Compute-intensive recommendation requests with a strong daily traffic cycle', lever: 'Compute rightsizing, autoscaling to diurnal traffic' },
+  { id: 'search', name: 'Search & Discovery', short: 'Search', weight: 0.13, util: 0.7, growthAdj: 0.002, tier: 'Tier 0', reservedRatio: 0.8, priceFactor: 1.0, coldDataPct: 0.22, storageWeight: 0.1, networkWeight: 0.14, isAI: false, productRole: 'Captures user intent across text and visual search', challenge: 'Latency-sensitive queries; capacity must sit close to users', lever: 'Regional capacity optimization and placement' },
+  { id: 'ads', name: 'Ads Serving', short: 'Ads', weight: 0.16, util: 0.8, growthAdj: 0.005, tier: 'Tier 0', reservedRatio: 0.85, priceFactor: 1.05, coldDataPct: 0.2, storageWeight: 0.1, networkWeight: 0.18, isAI: false, productRole: 'Monetization; revenue scales with served impressions', challenge: 'High-throughput, latency-sensitive auctions', lever: 'Compute and network efficiency per auction' },
+  { id: 'ml-training', name: 'ML Training & Inference (AI)', short: 'AI / ML', weight: 0.17, util: 0.86, growthAdj: 0.016, tier: 'Tier 1', reservedRatio: 0.78, priceFactor: 2.6, coldDataPct: 0.34, storageWeight: 0.16, networkWeight: 0.16, isAI: true, productRole: 'Powers recommendations, ads relevance and visual search', challenge: 'Expensive GPU consumption for training and inference', lever: 'GPU utilization, job scheduling, batching' },
+  { id: 'media', name: 'Image Serving & Processing', short: 'Image Serving', weight: 0.12, util: 0.5, growthAdj: 0.0, tier: 'Tier 1', reservedRatio: 0.8, priceFactor: 1.2, coldDataPct: 0.56, storageWeight: 0.28, networkWeight: 0.12, isAI: false, productRole: 'Every Pin is an image; served in many sizes worldwide', challenge: 'High storage and network (egress) demand', lever: 'Image compression, CDN caching, cold-tiering originals' },
+  { id: 'data-platform', name: 'Data Platform (Batch / Spark)', short: 'Data Platform', weight: 0.14, util: 0.4, growthAdj: -0.002, tier: 'Tier 2', reservedRatio: 0.76, priceFactor: 0.9, coldDataPct: 0.62, storageWeight: 0.18, networkWeight: 0.1, isAI: false, productRole: 'Analytics, experimentation and ML training data', challenge: 'Large batch processing and long data retention', lever: 'Off-peak scheduling, storage tiering' },
+  { id: 'core-api', name: 'Core API & Services', short: 'Core API', weight: 0.08, util: 0.6, growthAdj: 0.001, tier: 'Tier 0', reservedRatio: 0.84, priceFactor: 1.0, coldDataPct: 0.15, storageWeight: 0.06, networkWeight: 0.1, isAI: false, productRole: 'Shared backbone: users, Pins, boards and graph APIs', challenge: 'Fan-out from every product surface; must stay up', lever: 'Rightsizing that preserves N+1 AZ headroom' },
 ]
 
 export const INFRA_TYPES: { id: InfraType; name: string; unit: string }[] = [
@@ -235,7 +253,33 @@ function buildInventory(): InventoryRow[] {
   return rows
 }
 
-export const INVENTORY: InventoryRow[] = buildInventory()
+const AI_AZ_WEIGHTS = [0.6, 0.25, 0.15] // GPU supply is typically concentrated where it could be obtained
+
+/** Spread each compute pool across AZs. Uses its own RNG so the base inventory stays stable. */
+function splitAcrossAzs(rows: InventoryRow[]) {
+  const rand = mulberry32(4242)
+  for (const r of rows) {
+    if (r.type !== 'compute') continue
+    const region = REGIONS.find((x) => x.id === r.region)!
+    const w = WORKLOADS.find((x) => x.id === r.workload)!.isAI ? AI_AZ_WEIGHTS : region.azWeights
+    const prov = w.map((x) => Math.round(r.provisioned * x))
+    prov[prov.length - 1] += r.provisioned - prov.reduce((a, b) => a + b, 0)
+    const util = r.used / r.provisioned
+    let used = region.azSkew.map((k, i) => prov[i] * Math.min(0.98, util * k * (1 + (rand() - 0.5) * 0.04)))
+    for (let iter = 0; iter < 10; iter++) {
+      const f = r.used / used.reduce((a, b) => a + b, 0)
+      used = used.map((u, i) => Math.min(prov[i] * 0.98, u * f))
+    }
+    const rounded = used.map(Math.round)
+    const room = rounded.map((u, i) => prov[i] - u)
+    rounded[room.indexOf(Math.max(...room))] += r.used - rounded.reduce((a, b) => a + b, 0)
+    r.azSplit = region.azs.map((az, i) => ({ az, provisioned: prov[i], used: rounded[i] }))
+    r.az = `${region.azs.length} AZs`
+  }
+  return rows
+}
+
+export const INVENTORY: InventoryRow[] = splitAcrossAzs(buildInventory())
 
 export const regionById = (id: string) => REGIONS.find((r) => r.id === id)!
 export const workloadById = (id: string) => WORKLOADS.find((w) => w.id === id)!

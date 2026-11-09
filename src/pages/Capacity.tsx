@@ -5,6 +5,7 @@ import { CAPACITY_THRESHOLD, INFRA_TYPES, REGIONS, regionById, workloadById } fr
 import { capacityType, filterRows, forecastUsed, regionComputeBaseline, regionStats, scenarioComparison, simulate, workloadStats, type Filters } from '../lib/calc'
 import { addMonths, fmtCompact, fmtDate, fmtNum, fmtPct, fmtUSD } from '../lib/format'
 import { useStore } from '../state/store'
+import FailoverSimulator from '../components/FailoverSimulator'
 import { Badge, Card, CardTitle, CHART, ChartTooltip, MeasuredTag, REGION_STATUS_LABEL, Segmented, Select, statusTone, Td, Th, UtilBar, cx } from '../components/ui'
 
 export default function Capacity() {
@@ -111,6 +112,8 @@ export default function Capacity() {
 
       <Simulator filters={filters} />
 
+      <FailoverSimulator key={filters.region} defaultRegion={filters.region} />
+
       <Inventory filters={filters} />
     </div>
   )
@@ -168,7 +171,7 @@ function Simulator({ filters }: { filters: Filters }) {
           </div>
           <Slider label="2. Demand change today" value={demandAdj * 100} min={-30} max={50} step={1} fmt={(v) => `${v > 0 ? '+' : ''}${v}%`} onChange={(v) => setDemandAdj(v / 100)} hint="Step change, e.g. new launch or migration" />
           <Slider label="3. Monthly growth rate" value={+(growth * 100).toFixed(1)} min={-2} max={10} step={0.1} fmt={(v) => `${v.toFixed(1)}%/mo`} onChange={setGrowthPct} hint={`Baseline ${fmtPct(base.growth, 1)}/mo from trailing trend`} />
-          <Slider label="Capacity threshold" value={threshold * 100} min={70} max={95} step={1} fmt={(v) => `${v}%`} onChange={(v) => setThreshold(v / 100)} hint="Planning ceiling preserving failover buffer" />
+          <Slider label="Capacity threshold" value={threshold * 100} min={70} max={95} step={1} fmt={(v) => `${v}%`} onChange={(v) => setThreshold(v / 100)} hint="Aggregate planning ceiling (see AZ failover check below for N+1)" />
           <div>
             <div className="mb-1 text-xs font-medium text-muted">Horizon</div>
             <Segmented value={String(horizon)} onChange={(v) => setHorizon(Number(v))} options={[{ value: '6', label: '6 mo' }, { value: '12', label: '12 mo' }, { value: '18', label: '18 mo' }]} />

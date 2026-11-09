@@ -2,7 +2,7 @@ import { useMemo } from 'react'
 import { Area, AreaChart, Bar, CartesianGrid, ComposedChart, Line, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis, Legend } from 'recharts'
 import { Server, Activity, Boxes, Wallet, PiggyBank, AlertTriangle, ArrowRight, CheckCircle2, CircleAlert, CircleDot } from 'lucide-react'
 import { CAPACITY_THRESHOLD, INFRA_TYPES, REGIONS, monthLabel } from '../data/model'
-import { budgetFor, capacityType, filterOpps, filterRows, forecastSeries, forecastUsed, historySeries, regionStats, sum, LOW_CONFIDENCE, type Filters } from '../lib/calc'
+import { budgetFor, capacityType, worstCaseFailover, FAILOVER_CEILING, filterOpps, filterRows, forecastSeries, forecastUsed, historySeries, regionStats, sum, LOW_CONFIDENCE, type Filters } from '../lib/calc'
 import { fmtCompact, fmtNum, fmtPct, fmtUSD } from '../lib/format'
 import { programFinancials } from '../lib/program'
 import { useOpportunities, useStore } from '../state/store'
@@ -266,7 +266,11 @@ function HealthIndicators({ capRows, spend, budget, regions, programSavingsAtRis
   const stranded = capRows.reduce((s, r) => s + Math.max(0, r.reserved - r.used), 0)
   const coverage = reserved / Math.max(1, sum(capRows, 'used'))
   const firstConstraint = regions.map((r) => r.monthsToThreshold).filter((m): m is number => m !== null).sort((a, b) => a - b)[0]
+  const n1 = regions.map((r) => worstCaseFailover(r.id, FAILOVER_CEILING, 'tier01'))
+  const n1Pass = n1.filter((r) => r.sufficient).length
+  const n1Units = n1.reduce((s, r) => s + r.unitsNeeded, 0)
   const items: { label: string; value: string; state: 'good' | 'warn' | 'bad'; note: string }[] = [
+    { label: 'N+1 AZ failover (worst-case AZ)', value: `${n1Pass}/${n1.length} regions`, state: n1Pass === n1.length ? 'good' : n1Pass > 0 ? 'warn' : 'bad', note: n1Units ? `Tier 0+1 short ${fmtNum(n1Units)} units at ${FAILOVER_CEILING * 100}% failover ceiling` : 'All protected pools survive losing any one AZ' },
     { label: 'Capacity in healthy band (50–85%)', value: fmtPct(healthyBand, 0), state: healthyBand > 0.6 ? 'good' : healthyBand > 0.4 ? 'warn' : 'bad', note: 'Share of provisioned capacity neither idle nor constrained' },
     { label: 'Stranded reserved capacity', value: fmtPct(stranded / Math.max(1, reserved), 0), state: stranded / reserved < 0.05 ? 'good' : stranded / reserved < 0.12 ? 'warn' : 'bad', note: `${fmtNum(stranded)} reserved units not consumed` },
     { label: 'Reservation coverage of usage', value: fmtPct(coverage, 0), state: coverage >= 0.8 && coverage <= 1.05 ? 'good' : 'warn', note: 'Target 80–100% of steady-state usage' },

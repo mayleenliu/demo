@@ -6,7 +6,9 @@ import type { Initiative } from '../data/program'
 import {
   OPPORTUNITIES,
   LOW_CONFIDENCE,
-  RIGHTSIZE_TARGET,
+  rightsizeTarget,
+  FAILOVER_CEILING,
+  worstCaseFailover,
   filterOpps,
   filterRows,
   forecastUsed,
@@ -20,9 +22,11 @@ import {
   type Opportunity,
 } from './calc'
 import { addMonths, fmtDate, fmtNum, fmtPct, fmtUSD } from './format'
+import { BOTTLENECK_FIX, gpuFleet } from './gpu'
+import { GPU_RATE } from '../data/gpu'
 import { crossTeamDependencies, nextMilestone, programFinancials, programHealth, upcomingDecisions } from './program'
 
-export type WorkflowId = 'efficiency' | 'capacity' | 'executive' | 'prioritize' | 'unknown'
+export type WorkflowId = 'efficiency' | 'capacity' | 'executive' | 'prioritize' | 'gpu' | 'unknown'
 
 export interface Section {
   heading: string
@@ -61,10 +65,12 @@ export const SUGGESTED_PROMPTS: { workflow: WorkflowId; label: string; prompt: s
   { workflow: 'capacity', label: 'Capacity planning', prompt: 'Will US East have sufficient capacity over the next six months?' },
   { workflow: 'executive', label: 'Executive update', prompt: "Generate an executive update for this month's capacity optimization program." },
   { workflow: 'prioritize', label: 'Prioritization', prompt: 'Which three initiatives should we prioritize this quarter?' },
+  { workflow: 'gpu', label: 'GPU efficiency', prompt: 'Why is our GPU utilization low, and do we need to buy more GPUs?' },
 ]
 
 export function detectWorkflow(q: string): WorkflowId {
   const s = q.toLowerCase()
+  if (/\b(gpus?|training jobs?|accelerators?)\b/.test(s)) return 'gpu'
   if (/(executive|exec update|status update|report|summary for leadership|update for)/.test(s)) return 'executive'
   if (/(prioriti|which three|top three|rank|this quarter|focus on)/.test(s)) return 'prioritize'
   if (/(capacity|sufficient|run out|exhaust|headroom|enough|forecast)/.test(s) && !/(efficien|waste|sav)/.test(s)) return 'capacity'
@@ -131,7 +137,7 @@ function efficiency(q: string, ctx: AIContext): AIResponse {
   const sections: Section[] = top.map((o, i) => ({
     heading: `${i + 1}. ${o.title}`,
     bullets: [
-      `Why it's inefficient: ${o.observedUtil} on ${o.currentConfig}.${o.category === 'Underutilized compute' ? ` Target is ${RIGHTSIZE_TARGET * 100}% utilization.` : ''}`,
+      `Why it's inefficient: ${o.observedUtil} on ${o.currentConfig}.${o.category === 'Underutilized compute' ? ` Target is ${Math.round(rightsizeTarget(workloadById(o.workloads[0]).tier) * 100)}% utilization.` : ''}`,
       `Proposed: ${o.proposed}.`,
       `Expected savings: ${fmtUSD(o.monthlySavings)}/mo (${fmtUSD(o.monthlySavings * 12)}/yr) · confidence ${fmtPct(o.confidence, 0)}${o.confidence < LOW_CONFIDENCE ? ' ⚠ low — investigate before approval' : ''}.`,
       `Risks: ${o.risk} implementation risk, ${o.effort.toLowerCase()} effort. ${o.considerations}`,
@@ -170,7 +176,7 @@ function efficiency(q: string, ctx: AIContext): AIResponse {
     ],
     calculations: top.flatMap((o) => o.calc.map((c) => ({ ...c, label: `${o.title} · ${c.label}` }))),
     assumptions: [
-      `Rightsizing targets ${RIGHTSIZE_TARGET * 100}% steady-state utilization, preserving headroom for AZ failover.`,
+      `Rightsizing targets ${rightsizeTarget('Tier 0') * 100}% for Tier 0 (survives losing one of three AZs at a ${FAILOVER_CEILING * 100}% ceiling) and 65% for Tier 1/2, which can degrade or defer during an AZ event.`,
       'Unit prices are held flat at current blended rates; savings are realized only after reservations roll off.',
       'Savings estimates include haircuts for reservation lock-in, egress and migration effort.',
       'Utilization is measured as 90-day p95; seasonality beyond 90 days is not captured.',
@@ -198,6 +204,8 @@ function capacity(q: string, ctx: AIContext): AIResponse {
   const needUnits = Math.max(0, Math.ceil(f6 / CAPACITY_THRESHOLD - b.provisioned))
   const sufficient = needUnits === 0
   const orderBy = crossM === null ? null : addMonths(Math.max(0, crossM - b.leadTime))
+  const n1 = worstCaseFailover(regionId, FAILOVER_CEILING, 'tier01')
+  const n1Pools = n1.pools.filter((p) => p.protected && p.shortfall >= 1)
 
   // Supply options.
   const reclaim = b.reclaimable
@@ -231,6 +239,9 @@ function capacity(q: string, ctx: AIContext): AIResponse {
         `Current: ${fmtNum(b.used)} of ${fmtNum(b.provisioned)} units used (${fmtPct(util)}).`,
         `Forecast demand in 6 months: ${fmtNum(f6)} units (${fmtPct(f6 / b.provisioned)} of today's supply) at ${fmtPct(b.growth)} compounded monthly growth.`,
         `AI / ML workloads are ${fmtPct(b.aiShare, 0)} of regional demand and the fastest-growing segment.`,
+        n1.sufficient
+          ? `N+1 check: Tier 0/1 pools survive losing any single AZ (worst case ${n1.failedAz}) at a ${FAILOVER_CEILING * 100}% failover ceiling.`
+          : `N+1 check: losing ${n1.failedAz} leaves ${fmtNum(n1.shortfall)} units of load with nowhere to run (${n1Pools.map((p) => p.name).join(', ')}). That needs +${fmtNum(n1.unitsNeeded)} units (${fmtUSD(n1.monthlyInvestment)}/mo) even though aggregate utilization is only ${fmtPct(n1.aggregateUtil, 0)}.`,
         !sufficient && orderBy ? `Procurement lead time is ${b.leadTime} months → order decision needed by ${fmtDate(orderBy)}${orderBy <= AS_OF ? ' (already past — escalate)' : ''}.` : 'No procurement decision required within the 6-month horizon.',
       ],
     },
@@ -280,17 +291,18 @@ function capacity(q: string, ctx: AIContext): AIResponse {
       { label: 'Threshold crossing', formula: `ln(${CAPACITY_THRESHOLD} × ${fmtNum(b.provisioned)} ÷ ${fmtNum(b.used)}) ÷ ln(1 + g)`, result: crossM === null ? '> 36 months' : crossM === 0 ? 'already crossed' : `${crossM.toFixed(1)} months` },
       { label: 'Physical exhaustion', formula: `ln(${fmtNum(b.provisioned)} ÷ ${fmtNum(b.used)}) ÷ ln(1 + g)`, result: `${exhaustM.toFixed(1)} months` },
       { label: 'Required additional capacity', formula: `max(0, ${fmtNum(f6)} ÷ ${CAPACITY_THRESHOLD} − ${fmtNum(b.provisioned)})`, result: `${fmtNum(needUnits)} units` },
+      { label: 'N+1 worst-case AZ', formula: `lose ${n1.failedAz}; per pool: displaced − Σ max(0, ${FAILOVER_CEILING} × prov − used) in surviving AZs; Tier 0+1 only`, result: n1.sufficient ? 'survives' : `+${fmtNum(n1.unitsNeeded)} units` },
       { label: 'Purchase cost (unoptimized)', formula: `${fmtNum(needUnits)} × ${fmtUSD(b.unitCost)}`, result: `${fmtUSD(needUnits * b.unitCost)}/mo` },
     ],
     assumptions: [
       'Growth compounds monthly at the trailing blended rate by workload; no step-change launches modeled (use the simulator for what-ifs).',
-      `Planning threshold is ${CAPACITY_THRESHOLD * 100}% to preserve N+1 AZ failover headroom.`,
+      `Planning threshold is ${CAPACITY_THRESHOLD * 100}% aggregate utilization. This alone does not guarantee N+1; AZ failover is checked separately per hardware pool.`,
       'Cross-region reallocation excluded where EU / non-EU data residency would be violated.',
       'Portable demand estimated as AI share + 10% of batch.',
     ],
     confidence: Math.max(0.55, 0.88 - Math.abs(b.growth) * 4),
     confidenceNote: 'Higher growth rates widen forecast error bands; confidence decays with growth volatility.',
-    dataSources: ['Inventory: compute fleet', 'Utilization telemetry', 'Capacity forecast model', 'Billing'],
+    dataSources: ['Inventory: compute fleet (per AZ)', 'Utilization telemetry', 'Capacity forecast model', 'Billing'],
     scope: `${reg.name} · compute · all workloads`,
   }
 }
@@ -439,6 +451,80 @@ function prioritize(q: string, ctx: AIContext): AIResponse {
   }
 }
 
+/* ---------------- Workflow 5: GPU efficiency ---------------- */
+const REALISTIC_GPU_PLAN = { pipeline: 0.8, batching: 0.7, rightsize: 1, idleRelease: 1, backfill: 0.5 }
+
+function gpu(q: string, ctx: AIContext): AIResponse {
+  const f = gpuFleet(ctx.filters.region)
+  const plan = gpuFleet(ctx.filters.region, REALISTIC_GPU_PLAN).whatIf
+  const fixes = f.jobs.filter((j) => j.savings > 0 && ctx.oppStatus[`opp-gpu-${j.id}`] !== 'Completed').sort((a, b) => b.savings - a.savings)
+  const top = fixes.slice(0, 3)
+  const t = f.training.segs
+  const tAvail = Math.max(1, f.training.available)
+  const ai = ctx.initiatives.find((i) => i.id === 'init-ai-readiness')
+  const sections: Section[] = [
+    {
+      heading: 'Diagnosis',
+      callout: { tone: 'risk', text: `${fmtPct(f.allocRate, 0)} of GPU-hours are allocated, but only ${fmtPct(f.effectiveUtil, 0)} do useful compute. GPUs look full to the scheduler but sit mostly idle.` },
+      bullets: [
+        `Waiting on data: ${fmtPct(t.dataStall / tAvail, 0)} of training GPU-time (image decode / feature loading can't keep GPUs fed).`,
+        `Underfilled GPUs: ${fmtPct(t.underfilled / tAvail, 0)} of training time and ${fmtPct(f.inference.segs.underfilled / Math.max(1, f.inference.available), 0)} of inference time (small batches, unbatched requests).`,
+        `Idle reservations: ${fmtPct(t.idleReserved / tAvail, 0)} of training GPU-time is held by notebooks with no activity.`,
+        `Unallocated: ${fmtNum(f.unallocTraining)} training GPU-hrs/mo have no job scheduled, mostly overnight, while sweeps wait up to 14 h in the queue.`,
+        `GPU memory averages ${fmtPct(f.memUtil, 0)}, so most jobs could run larger batches or share a GPU.`,
+      ],
+    },
+    ...top.map((j, i) => ({
+      heading: `${i + 1}. ${j.bottleneck}: ${j.name}`,
+      bullets: [
+        `Observed: SM ${fmtPct(j.smUtil, 0)}, memory ${fmtPct(j.memUtil, 0)}, data-wait ${fmtPct(j.dataWait, 0)}, ${fmtNum(j.gpuHours)} GPU-hrs/mo (${regionById(j.region).name}).`,
+        `Fix: ${BOTTLENECK_FIX[j.bottleneck]}.`,
+        `Impact: SM ${fmtPct(j.smUtil, 0)} → ${fmtPct(j.smAfter, 0)}, frees ~${fmtNum(j.savedHours / 720)} GPUs, ${fmtUSD(j.savings)}/mo. Tradeoff: ${j.tradeoff}.`,
+      ],
+    })),
+    {
+      heading: 'Do we need to buy more GPUs?',
+      bullets: [
+        `A realistic plan (80% pipeline fixes, 70% batching, all right-sizing and idle release, 50% backfill) frees ~${fmtNum(plan.gpusFreed)} GPU-equivalents, worth ${fmtUSD(plan.monthlySavings)}/mo.`,
+        ai ? `That offsets ${fmtPct(Math.min(1, plan.monthlySavings / ai.monthlyInvestment), 0)} of the ${fmtUSD(ai.monthlyInvestment)}/mo planned for "${ai.name}". Size the H1 reservation to post-fix utilization, not today's.` : 'Size any GPU reservation to post-fix utilization.',
+        'Keep a smaller reservation for genuinely new demand (new model families). Utilization work doesn\'t create capacity for workloads that aren\'t running yet.',
+      ],
+    },
+  ]
+  return {
+    id: rid(),
+    workflow: 'gpu',
+    question: q,
+    title: 'GPU utilization diagnosis',
+    summary: `GPU utilization is low because of how jobs run, not because the fleet is too small. ${fmtNum(f.gpus)} GPUs are ${fmtPct(f.allocRate, 0)} allocated but only ${fmtPct(f.effectiveUtil, 0)} effectively used, so each useful GPU-hour costs $${f.costPerUsefulHour.toFixed(2)}. Fixing input pipelines, batching and idle reservations first would cut new GPU purchases by roughly ${fmtUSD(plan.monthlySavings)}/mo.`,
+    sections,
+    sourceMetrics: [
+      { label: 'GPU fleet', value: `${fmtNum(f.gpus)} (${f.training.gpus} training / ${f.inference.gpus} inference)`, source: 'Inventory: GPU pools' },
+      { label: 'Allocation rate', value: fmtPct(f.allocRate), source: 'Scheduler logs (30-day)' },
+      { label: 'SM utilization while allocated', value: fmtPct(f.smUtil), source: 'GPU telemetry (30-day)' },
+      { label: 'GPU memory utilization', value: fmtPct(f.memUtil), source: 'GPU telemetry (30-day)' },
+      { label: 'GPU spend', value: `${fmtUSD(f.spend)}/mo`, source: 'Billing: GPU spend' },
+    ],
+    calculations: [
+      { label: 'Effective utilization', formula: `useful GPU-hrs ${fmtNum(f.useful)} ÷ available ${fmtNum(f.available)}`, result: fmtPct(f.effectiveUtil) },
+      { label: 'Cost per useful GPU-hour', formula: `${fmtUSD(f.spend)} ÷ ${fmtNum(f.useful)} useful hrs (list $${GPU_RATE.Training.perHour} / $${GPU_RATE.Inference.perHour})`, result: `$${f.costPerUsefulHour.toFixed(2)}` },
+      ...top.flatMap((j) => j.calc.slice(-2).map((c) => ({ ...c, label: `${j.name} · ${c.label}` }))),
+      { label: 'Realistic plan', formula: 'Σ job savings × adoption + 60% × unallocated training hrs × 50% backfill', result: `${fmtNum(plan.gpusFreed)} GPUs · ${fmtUSD(plan.monthlySavings)}/mo` },
+    ],
+    assumptions: [
+      'SM utilization is the share of time GPU compute units are active; ~60–70% is a realistic ceiling for mixed training workloads.',
+      'Recovered stall time turns into compute at the job\'s current intensity (60% of data-wait recovered).',
+      'Rates are blended committed-use prices; freed hours are valued at those rates.',
+      'Backfill is valued as avoided purchases for queued demand, not as a reduction in today\'s bill.',
+    ],
+    confidence: 0.78,
+    confidenceNote: '30 days of telemetry; per-job confidence is 70–86% depending on how deterministic the fix is.',
+    dataSources: ['GPU telemetry (30-day SM / memory)', 'Scheduler logs', 'Billing: GPU spend', 'Program tracker'],
+    scope: ctx.filters.region === 'all' ? 'All regions · AI / ML GPU fleet' : `${regionById(ctx.filters.region).name} · AI / ML GPU fleet`,
+    actionableOppIds: top.map((j) => `opp-gpu-${j.id}`).filter((id) => OPPORTUNITIES.some((o) => o.id === id)),
+  }
+}
+
 function base(q: string, workflow: WorkflowId, title: string, summary: string, ctx: AIContext, extra: Partial<AIResponse>): AIResponse {
   return {
     id: rid(),
@@ -468,8 +554,10 @@ export function answer(q: string, ctx: AIContext): AIResponse {
       return executive(q, ctx)
     case 'prioritize':
       return prioritize(q, ctx)
+    case 'gpu':
+      return gpu(q, ctx)
     default:
-      return base(q, 'unknown', "I can't answer that from the available data", 'This simulated assistant only answers questions it can ground in the in-app dataset. Try one of the supported workflows: efficiency opportunities, regional capacity outlook (name a region), executive program update, or quarterly prioritization.', ctx, {
+      return base(q, 'unknown', "I can't answer that from the available data", 'This simulated assistant only answers questions it can ground in the in-app dataset. Try one of the supported workflows: efficiency opportunities, regional capacity outlook (name a region), executive program update, quarterly prioritization, or GPU utilization.', ctx, {
         confidence: 1,
         confidenceNote: 'No analysis performed.',
         sections: [{ heading: 'Supported questions', bullets: SUGGESTED_PROMPTS.map((p) => p.prompt) }],
