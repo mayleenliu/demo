@@ -1,4 +1,4 @@
-import { AS_OF } from '../data/model'
+import { AS_OF } from '../data/fleet'
 
 export function fmtUSD(n: number, digits = 1): string {
   const abs = Math.abs(n)
@@ -40,3 +40,4 @@ export function addMonths(months: number, from: Date = AS_OF) {
 
 export const daysBetween = (a: Date, b: Date) => Math.round((b.getTime() - a.getTime()) / 86_400_000)
 export const toDate = (iso: string) => new Date(iso + 'T12:00:00')
+

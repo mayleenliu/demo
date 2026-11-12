@@ -15,8 +15,30 @@ export const CHART = {
   regions: ['#e60023', '#4a5d73', '#0f7b6c', '#c27c0e', '#a3a3a3'],
 }
 
-export function Card({ children, className, pad = true }: { children: ReactNode; className?: string; pad?: boolean }) {
-  return <div className={cx('rounded-2xl border border-line bg-white shadow-[0_1px_2px_rgba(0,0,0,0.03)]', pad && 'p-5', className)}>{children}</div>
+export function Card({ children, className, pad = true, id }: { children: ReactNode; className?: string; pad?: boolean; id?: string }) {
+  return (
+    <div id={id} className={cx('scroll-mt-28 rounded-2xl border border-line bg-white shadow-[0_1px_2px_rgba(0,0,0,0.03)]', pad && 'p-5', className)}>
+      {children}
+    </div>
+  )
+}
+
+/** Secondary content hidden by default to keep each page focused on its main story. */
+export function MoreDetails({ children, label = 'details' }: { children: ReactNode; label?: string }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div>
+      <button onClick={() => setOpen(!open)} className="flex w-full items-center gap-3 text-xs font-medium text-muted hover:text-ink">
+        <span className="h-px flex-1 bg-line" />
+        <span className="flex items-center gap-1 rounded-full border border-line bg-white px-3 py-1">
+          {open ? 'Hide' : 'Show more'} {label}
+          <ChevronDown size={13} className={cx('transition', open && 'rotate-180')} />
+        </span>
+        <span className="h-px flex-1 bg-line" />
+      </button>
+      {open && <div className="mt-6 space-y-6">{children}</div>}
+    </div>
+  )
 }
 
 export function CardTitle({ title, subtitle, right, info }: { title: ReactNode; subtitle?: ReactNode; right?: ReactNode; info?: string }) {

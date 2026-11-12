@@ -1,10 +1,14 @@
-# Infrastructure Capacity & Efficiency Control Tower
+# SDN Appliance Capacity Planning
 
-An interactive decision-support demo that shows how an Infrastructure TPM can manage cloud capacity, improve utilization, find cost inefficiencies, and use AI to cut down on program-management toil.
+An interactive decision-support demo for a **capacity TPM running a network (SDN) appliance fleet**. It walks through the questions that come up every month:
 
-> **Portfolio demo.** All data is synthetic and illustrative. It is not affiliated with, and does not represent, any company's internal systems. No credentials, production endpoints, or private infrastructure information are used.
+- **Do we approve this customer request, phase it, or escalate for power?**
+- **When do we order and dock?**
+- **Can we rebalance racks to where they're needed?**
+- **How do we refresh Gen6 before EOL: Gen8 now, or wait for Gen11?**
+- **What do we decommission, and what's the write-off?**
 
-**Live demo:** https://mayleenliu.github.io/demo/
+> **Portfolio demo.** All fleet data, sites, SKUs and numbers are synthetic and illustrative. It does not represent any company's systems.
 
 ## Run locally
 
@@ -12,56 +16,37 @@ Requires Node.js 20+.
 
 ```bash
 npm install
-npm run dev      # http://localhost:5173
+npm run dev      # http://localhost:5173 (edits under src/ hot-reload)
 npm run build    # production build to dist/
 ```
 
-There's no backend and no API keys. App state (approvals, statuses, audit log) is saved in `localStorage`. Use **Reset demo data** in the sidebar to restore the starting state.
+No backend and no API keys. Decisions you make (approvals, orders, rebalancing, retirements) are saved in `localStorage`. Use **Reset decisions** in the sidebar to start over.
 
-## What's inside
+## Pages
 
-| Section | What it demonstrates |
+| Page | What it shows |
 | --- | --- |
-| **Executive Overview** | KPIs, 12-month utilization trend, spend vs budget, 6-month demand forecast, regional heatmap, top opportunities, health indicators |
-| **Capacity & Utilization** | Inventory (region / AZ / workload / hardware / reserved / headroom), utilization by region and workload, a forecasting simulator (demand, growth, threshold, horizon, optimize-first), a what-if comparison (business-as-usual vs AI-accelerated growth vs optimize-before-buying), and an **AZ failover simulator** that fails one AZ and moves its load into the same hardware pool in the surviving AZs |
-| **Cost Optimization** | A workload economics table (business role → infrastructure challenge → optimization lever → spend → savings), plus rule-based detection of underutilized compute and GPUs, CDN / image-format savings, storage, network, and stranded capacity; a prioritization matrix; sortable table; approval workflow (Proposed → Under Review → Approved → In Progress → Completed); push approved items to Program Execution |
-| **GPU Efficiency** | GPU fleet allocation vs useful compute (SM) utilization, GPU memory use, idle GPU-hours, cost per useful GPU-hour and per training run, a breakdown of where GPU time goes, a 24-hour profile, a per-job investigation checklist (waiting on data? memory underused? batchable? scheduling? over-provisioned?), and a what-if showing how much of the planned GPU purchase utilization fixes would offset |
-| **AI Recommendations** | Simulated assistant with five workflows: efficiency analysis, regional capacity planning (including an N+1 check), executive update, quarterly prioritization, and GPU utilization diagnosis. Each answer shows source metrics, calculations, assumptions, and confidence, and requires human review |
-| **Program Execution** | Initiative tracker and timeline, overdue / at-risk milestones, cross-team dependencies, decisions, program financials, and an AI TPM assistant (weekly status, risk scan, follow-ups, meeting notes → action items, dependency risk, exec summary) with edit and approval steps before anything is communicated |
-| **AI Governance** | Audit trail (sources, timestamp, confidence, reviewer, status, edits), responsible-AI principles, and a role-based access matrix. Switch roles in the sidebar to see redaction and approval gating |
+| **Overview** | Racks deployed and utilization, regions at risk, power, Gen6 EOL countdown, open requests; **deployed fleet** by generation (racks, utilization, MW, book value, EOL) and racks docked by year; regional table (now / +6 / +12 months, rack mix, power) |
+| **Capacity & Demand** | **Datacenter capacity**: space, power allocated vs drawn, stranded power, PUE, first region to run out; **trend and forecast** per region (racks deployed vs floor positions and power, racks needed at 75%, or % used) with the date a region runs out of space or power, with and without power reclaim; **customer requests** in racks against a cluster (Oracle 12 on phx23prdoci01, NetApp 10 on sn4prdnap01, Nutanix 200 on dsm10prdntx01, GitHub 100 on phx21prdgh01): approve if it fits → order racks if power and lead time allow → phase what fits → escalate for power → defer; **order timeline** (when a region hits 75%, order-by and dock-by, racks, Gen8 write-off); **optimize**: reclaim stranded power, reduce over-provisioning, unlock stranded space and power, improve PUE, protect availability (cluster-loss check); **rebalance racks** |
+| **Hardware Lifecycle** | **Gen6 refresh strategy** (wait for Gen11 vs hybrid vs all Gen8, with a Gen11 slip toggle); **racks by generation** roadmap; **rack table**: one row per rack with dock date, utilization, book value, recommendation, retire date and write-off, plus search, filters, sorting and bulk actions (don't replace at EOL, retire early) |
 
-Global filters (region, infra type, workload, time period) apply to every chart, metric, and AI answer.
+## Model & assumptions (`src/data/fleet.ts`, `src/lib/capacity.ts`)
 
-## About the "AI"
-
-No LLM is called. The assistant is a **deterministic engine** (`src/lib/ai.ts`, `src/lib/tpm.ts`) that computes every number from the in-app dataset and shows its work. This is intentional:
-
-- It never claims an analysis it didn't perform. Questions it can't answer from the data are declined.
-- Measured data and AI-generated content are labeled differently.
-- Recommendations below 60% confidence are flagged and can't be approved until a reviewer validates the source data.
-- The AI can recommend but has no way to change infrastructure.
-
-## Synthetic data assumptions
-
-- **Regions** (`src/data/model.ts`): five regions using the brief's provisioned / used / spend figures (e.g. US East 10,000 units, 7,200 used, $1.2M/mo). Each region has its own monthly growth rate (1.1%–3.8%), budget, procurement lead time (3–5 months), and capacity history.
-- **Workloads:** seven workloads (Home Feed, Search, Ads, AI/ML, Media, Data Platform, Core API) with different tiers, utilization profiles, growth adjustments (AI/ML grows fastest), and unit prices (GPU-heavy AI costs roughly 2.6× more per unit).
-- **Inventory:** generated with a seeded random number generator, so it's identical on every load. Compute usage is fitted to match each regional total exactly. Spend is split 62% compute, 23% storage, 15% network.
-- **Forecasting:** demand compounds monthly per workload. The aggregate planning threshold is **85%**.
-- **85% aggregate is not an N+1 guarantee.** Losing one of three equal AZs raises load on the survivors by 1.5×, so even perfectly interchangeable capacity must stay at or below ceiling × 2/3 (60% at a 90% failover ceiling). Unequal AZ sizes lower that limit further. Capacity also isn't interchangeable: GPU and Tier 0 pools can only fail over into the same pool. Each compute pool is therefore split across AZs with uneven sizes and load (e.g. EU Central's AZs run at 85% / 45% / 44%, 60% overall, mirroring a hot-AZ scenario). The failover simulator checks each pool separately. Tier 0 shortfalls count as outage risk, Tier 1 as degraded service, and Tier 2 batch as deferrable.
-- **Rightsizing targets are tier-aware:** 60% for Tier 0 (N+1-safe at a 90% failover ceiling) and 65% for Tier 1/2.
-- **Workloads** are modeled on Pinterest's publicly described product (visual discovery, Home Feed, search, ads, shopping, AI-driven recommendations). Each workload is mapped to its main infrastructure challenge and optimization lever. No internal information is used.
-- **GPU fleet** (`src/data/gpu.ts`, `src/lib/gpu.ts`): GPU counts come from each region's AI/ML compute spend at blended committed-use rates ($2.80/hr H100-class training, $0.85/hr L4-class inference). Jobs carry 30-day telemetry: SM and memory utilization, data-wait, communication overhead, multi-GPU scaling efficiency, and queue wait. Each job's main bottleneck is diagnosed by rules and gets a fix with an estimated utilization gain (e.g. recover 60% of data-wait; dynamic batching up to 65% SM). Fleet totals: ~88% of GPU-hours are allocated but only ~33% do useful compute.
-- **Opportunity detection** (`src/lib/calc.ts`):
-  - Compute: under 58% utilization → rightsize to the tier target; savings × 0.85 to account for reservation lock-in.
-  - GPU: per-job bottleneck fixes worth more than $5K/mo.
-  - Image serving: CDN cache-hit 88% → 94% plus AVIF/WebP (~25% fewer bytes) cuts origin egress.
-  - Storage: cold data moved to a cheaper tier (60% price difference) plus oversized volumes shrunk to 80% full.
-  - Network: under 42% of p95 → resize to 60%; savings × 0.7.
-  - Stranded: reserved-but-unused capacity in regions with spare headroom, reallocated against the most constrained region's shortfall. The shortfall is counted only once, and data-residency limits are considered.
-  - Confidence drops as 90-day utilization volatility rises.
-- **Priority score** = financial impact ($K/mo) × confidence × feasibility, where feasibility = effort factor × risk factor.
-- **Program data** (`src/data/program.ts`): fictional people and initiatives, dated relative to Nov 9, 2026.
+- **Regions & clusters:** Azure regions (West US 3, Central US, South Central US, West Europe, North Europe). Racks belong to clusters named `<site>prd<customer><nn>`, e.g. `phx23prdoci01` (Oracle), `sn4prdnap01` (NetApp), `dsm10prdntx01` (Nutanix), `phx21prdgh01` (GitHub).
+- **Units:** everything is tracked in racks. Utilization is NIC utilization (provisioned ÷ capacity) per rack, and "racks in use" = Σ utilization. Every rack draws 10 kW and costs $200K, and has its own dock date.
+- **Fleet:** 700 Gen6 racks docked 2020–2025, mostly 2022–2024 (EOL Sep 2028) and 1,200 Gen8 racks docked 2025–2026 (EOL Dec 2032). Gen11 is GA Mar 2028 (EOL Dec 2035). Gen6 racks docked after Sep 2022 still carry book value at EOL.
+- **Planning line:** keep utilization ≤ 75%. "Hits 75%" is the first month a region crosses it. A request for N racks needs N ÷ 75% racks of new capacity if there's no headroom.
+- **Lead times:** 3 weeks order → dock, 4 weeks dock → live.
+- **Demand:** each region's racks in use compound monthly at its own growth rate, plus approved (or phased) requests from their need-by date.
+- **Power:** each region has a fixed MW allocation. Racks can only land if power is free; otherwise escalate.
+- **Book value:** per rack, straight line over 6 years from its dock date. Write-off = book value left at retirement: Gen6 at its swap date, and Gen8 bought before Gen11 GA at Gen8 EOL.
+- **Gen6 refresh:** rack-for-rack swaps, oldest racks first, 120 racks per month fleet-wide. Hybrid puts pre-2022 racks on Gen8 and the rest on Gen11. Gen8 bridge swaps are scheduled just in time, finishing 6 months before Gen6 EOL.
+- **Space & power (`src/lib/datacenter.ts`):** each region has floor positions and a power budget; capacity is whichever runs out first. A rack is allocated 10 kW but draws 35% idle + 45% × utilization of that, with peaks 1.2× average; allocated-but-never-drawn power is stranded. Re-baselining the allocation to 8.5 kW (peak at 75% utilization plus margin) reclaims it. Positions with no power behind them, or power with no positions, are stranded space/power.
+- **Over-provisioning:** racks beyond what 12-month demand plus open requests need at 75%.
+- **Availability:** in 12 months, on planned racks, a region should stay under 85% after losing one 40-rack cluster.
+- **PUE:** per region, against a 1.25 target at $0.08/kWh.
+- **Rebalancing:** moves the lowest-utilization Gen8 racks within a continent (~8 weeks); donor regions stay ≤ 70%.
 
 ## Tech
 
-React 19, TypeScript, Vite, Tailwind CSS v4, Recharts, Lucide icons. Deployed to GitHub Pages with GitHub Actions (`.github/workflows/deploy.yml`).
+React 19, TypeScript, Vite, Tailwind CSS v4, Recharts, Lucide icons. Deploys to GitHub Pages with GitHub Actions (`.github/workflows/deploy.yml`).

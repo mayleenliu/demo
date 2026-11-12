@@ -1,321 +1,169 @@
 import { useMemo, useState } from 'react'
-import { Bar, BarChart, CartesianGrid, Cell, ComposedChart, Legend, Line, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis, Area } from 'recharts'
-import { Lock, Search, Zap } from 'lucide-react'
-import { CAPACITY_THRESHOLD, INFRA_TYPES, REGIONS, regionById, workloadById } from '../data/model'
-import { capacityType, filterRows, forecastUsed, regionComputeBaseline, regionStats, scenarioComparison, simulate, workloadStats, type Filters } from '../lib/calc'
-import { addMonths, fmtCompact, fmtDate, fmtNum, fmtPct, fmtUSD } from '../lib/format'
+import { Area, CartesianGrid, ComposedChart, Legend, Line, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
+import { ArrowRight, Calculator, Check, Clock, Shuffle, X } from 'lucide-react'
+import { GENS, PLANNING_THRESHOLD, REGIONS, REQUESTS, genById, regionById, type CapacityRequest } from '../data/fleet'
+import { VERDICT_LABEL, buildPlan, decideRequest, gen11Ga, monthLabel, rebalanceOptions, toDate, type ReqStatus, type Verdict } from '../lib/capacity'
+import { fmtDate, fmtUSD } from '../lib/format'
 import { useStore } from '../state/store'
-import FailoverSimulator from '../components/FailoverSimulator'
-import { Badge, Card, CardTitle, CHART, ChartTooltip, MeasuredTag, REGION_STATUS_LABEL, Segmented, Select, statusTone, Td, Th, UtilBar, cx } from '../components/ui'
+import { DatacenterCapacity, Optimize } from './Datacenter'
+import { Badge, Button, Card, CardTitle, CHART, ChartTooltip, Drawer, Segmented, Select, Td, Th, cx } from '../components/ui'
+
+const VERDICT_TONE: Record<Verdict, 'green' | 'blue' | 'amber' | 'red'> = { fits: 'green', order: 'blue', phase: 'amber', escalate: 'red', defer: 'red' }
+const STATUS_TONE: Record<ReqStatus, 'neutral' | 'green' | 'amber' | 'red'> = { Pending: 'neutral', Approved: 'green', Phased: 'amber', Escalated: 'red', Deferred: 'red', Rejected: 'red' }
 
 export default function Capacity() {
-  const { filters } = useStore()
-  const type = capacityType(filters)
-  const unit = INFRA_TYPES.find((t) => t.id === type)!.unit
-  const regions = useMemo(() => regionStats(filters), [filters])
-  const workloads = useMemo(() => workloadStats(filters), [filters])
-
-  const regionChart = regions.map((r) => ({ name: r.name, provisioned: r.provisioned, used: r.used, reserved: r.reserved, forecast6: Math.round(r.forecast6), utilization: r.utilization, headroom6: Math.round(r.headroom6), headroomPct: r.headroom6 / r.provisioned, status: r.status }))
-
+  const { region } = useStore()
   return (
     <div className="space-y-6">
-      <div className="grid gap-4 xl:grid-cols-2">
-        <Card>
-          <CardTitle title="Provisioned vs consumed vs forecast" subtitle={`By region · ${type} (${unit}) · forecast = demand in 6 months`} right={<MeasuredTag />} />
-          <div className="h-64">
-            <ResponsiveContainer>
-              <BarChart data={regionChart} margin={{ top: 5, right: 5, left: -10, bottom: 0 }} barGap={2}>
-                <CartesianGrid stroke="#f0f0f0" vertical={false} />
-                <XAxis dataKey="name" tickLine={false} axisLine={false} />
-                <YAxis tickFormatter={fmtCompact} tickLine={false} axisLine={false} />
-                <Tooltip content={<ChartTooltip formatter={(v) => `${fmtNum(v)} ${unit}`} />} />
-                <Legend iconType="circle" iconSize={8} />
-                <Bar dataKey="provisioned" name="Provisioned" fill={CHART.light} radius={[4, 4, 0, 0]} />
-                <Bar dataKey="used" name="Consumed" fill={CHART.ink} radius={[4, 4, 0, 0]} />
-                <Bar dataKey="forecast6" name="Forecast demand (+6 mo)" fill={CHART.red} radius={[4, 4, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        </Card>
-        <Card>
-          <CardTitle title="Capacity headroom by region (+6 months)" subtitle={`Supply minus forecast demand as % of supply · dashed line = 15% buffer; bars left of it breach the ${CAPACITY_THRESHOLD * 100}% threshold`} right={<Badge tone="ai">Forecast model</Badge>} />
-          <div className="h-64">
-            <ResponsiveContainer>
-              <BarChart data={regionChart} layout="vertical" margin={{ top: 5, right: 20, left: 10, bottom: 0 }}>
-                <CartesianGrid stroke="#f0f0f0" horizontal={false} />
-                <XAxis type="number" tickFormatter={(v) => `${Math.round(v * 100)}%`} tickLine={false} axisLine={false} domain={[-0.15, 0.45]} ticks={[-0.15, 0, 0.15, 0.3, 0.45]} />
-                <YAxis type="category" dataKey="name" width={90} tickLine={false} axisLine={false} />
-                <Tooltip content={<ChartTooltip formatter={(v) => fmtPct(v)} />} />
-                <ReferenceLine x={1 - CAPACITY_THRESHOLD} stroke={CHART.red} strokeDasharray="4 4" />
-                <ReferenceLine x={0} stroke="#999" />
-                <Bar dataKey="headroomPct" name="Headroom (+6 mo)" radius={[0, 4, 4, 0]}>
-                  {regionChart.map((r) => (
-                    <Cell key={r.name} fill={r.headroomPct < 0 ? CHART.red : r.headroomPct < 1 - CAPACITY_THRESHOLD ? '#ff8a9a' : r.headroomPct > 0.4 ? '#93c5fd' : CHART.ink} />
-                  ))}
-                </Bar>
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        </Card>
-      </div>
-
-      <div className="grid gap-4 xl:grid-cols-5">
-        <Card className="xl:col-span-2">
-          <CardTitle title="Utilization by region" subtitle="Today vs 6-month forecast, with status" right={<MeasuredTag />} />
-          <div className="space-y-3">
-            {regions.map((r) => (
-              <div key={r.id}>
-                <div className="mb-1 flex items-center justify-between text-sm">
-                  <span className="font-medium">{r.name}</span>
-                  <span className="flex items-center gap-2">
-                    <Badge tone={statusTone(r.status)}>{REGION_STATUS_LABEL[r.status]}</Badge>
-                    <span className="tabular text-xs text-muted">
-                      {fmtPct(r.utilization, 0)} → <span className={r.forecastUtil6 >= CAPACITY_THRESHOLD ? 'font-semibold text-pin' : ''}>{fmtPct(r.forecastUtil6, 0)}</span>
-                    </span>
-                  </span>
-                </div>
-                <div className="relative h-2.5 overflow-hidden rounded-full bg-neutral-100">
-                  <div className="absolute h-full rounded-full bg-pin/25" style={{ width: `${Math.min(100, r.forecastUtil6 * 100)}%` }} />
-                  <div className={cx('absolute h-full rounded-full', r.utilization >= CAPACITY_THRESHOLD ? 'bg-pin' : 'bg-ink')} style={{ width: `${Math.min(100, r.utilization * 100)}%` }} />
-                  <div className="absolute top-0 h-full w-0.5 bg-white" style={{ left: `${CAPACITY_THRESHOLD * 100}%` }} />
-                </div>
-                <div className="mt-1 text-[11px] text-muted">
-                  {fmtNum(r.used)} / {fmtNum(r.provisioned)} {unit} · growth {fmtPct(r.growth, 1)}/mo ·{' '}
-                  {r.monthsToThreshold === null ? 'no threshold breach within 36 mo' : r.monthsToThreshold === 0 ? 'above threshold now' : `crosses 85% ~${fmtDate(addMonths(r.monthsToThreshold))}`}
-                </div>
-              </div>
-            ))}
-          </div>
-        </Card>
-        <Card className="xl:col-span-3">
-          <CardTitle title="Utilization by workload" subtitle={`${type} · today vs +6 months forecast`} right={<MeasuredTag />} />
-          <div className="h-72">
-            <ResponsiveContainer>
-              <ComposedChart data={workloads} margin={{ top: 5, right: 5, left: -10, bottom: 0 }}>
-                <CartesianGrid stroke="#f0f0f0" vertical={false} />
-                <XAxis dataKey="name" tickLine={false} axisLine={false} interval={0} tick={{ fontSize: 11 }} />
-                <YAxis tickFormatter={(v) => `${Math.round(v * 100)}%`} domain={[0, (max: number) => Math.max(1, Math.ceil(max * 10) / 10)]} tickLine={false} axisLine={false} />
-                <Tooltip content={<ChartTooltip formatter={(v) => fmtPct(v)} />} />
-                <Legend iconType="circle" iconSize={8} />
-                <ReferenceLine y={CAPACITY_THRESHOLD} stroke={CHART.red} strokeDasharray="4 4" />
-                <Bar dataKey="utilization" name="Utilization today" radius={[4, 4, 0, 0]} maxBarSize={36}>
-                  {workloads.map((w) => (
-                    <Cell key={w.id} fill={w.utilization >= CAPACITY_THRESHOLD ? CHART.red : w.utilization < 0.5 ? '#93c5fd' : CHART.ink} />
-                  ))}
-                </Bar>
-                <Line dataKey="forecastUtil6" name="Forecast (+6 mo)" stroke={CHART.red} strokeWidth={0} dot={{ r: 4, fill: '#fff', stroke: CHART.red, strokeWidth: 2 }} />
-              </ComposedChart>
-            </ResponsiveContainer>
-          </div>
-        </Card>
-      </div>
-
-      <Simulator filters={filters} />
-
-      <FailoverSimulator key={filters.region} defaultRegion={filters.region} />
-
-      <Inventory filters={filters} />
+      <DatacenterCapacity />
+      <RequestQueue />
+      <OrderTimeline key={region} />
+      <Optimize />
+      <Rebalance />
     </div>
   )
 }
 
-function Simulator({ filters }: { filters: Filters }) {
-  const [region, setRegion] = useState(filters.region === 'all' ? 'us-east' : filters.region)
-  const base = useMemo(() => regionComputeBaseline(region), [region])
-  const [demandAdj, setDemandAdj] = useState(0)
-  const [growthPct, setGrowthPct] = useState<number | null>(null)
-  const [threshold, setThreshold] = useState(CAPACITY_THRESHOLD)
-  const [horizon, setHorizon] = useState(12)
-  const [optimizeFirst, setOptimizeFirst] = useState(false)
-  const growth = growthPct === null ? base.growth : growthPct / 100
+/* ---------------- Requests ---------------- */
 
-  const sim = useMemo(() => simulate({ region, demandAdj, growth, threshold, horizon, optimizeFirst }), [region, demandAdj, growth, threshold, horizon, optimizeFirst])
-  const scenarios = useMemo(() => scenarioComparison(region, horizon, threshold), [region, horizon, threshold])
-  const reg = regionById(region)
-
-  const scenarioChart = sim.series.map((p, i) => ({
-    month: p.month,
-    bau: scenarios[0].series[i].demand,
-    ai: scenarios[1].series[i].demand,
-    supply: Math.round(base.provisioned * threshold),
-    supplyOpt: Math.round((base.provisioned + base.reclaimable) * threshold),
-  }))
+function RequestQueue() {
+  const { plan, region } = useStore()
+  const [open, setOpen] = useState<string | null>(null)
+  const rows = REQUESTS.filter((r) => region === 'all' || r.region === region).map((r) => ({ req: r, d: decideRequest(r, plan), status: plan.requests[r.id] ?? 'Pending' }))
+  const sel = rows.find((r) => r.req.id === open)
 
   return (
-    <Card>
-      <CardTitle
-        title={
-          <span className="flex items-center gap-2">
-            <Zap size={16} className="text-pin" /> Capacity forecasting simulator
-          </span>
-        }
-        subtitle="Compute capacity · adjust demand and growth to see when a region hits its threshold and what it costs to stay ahead"
-        right={<Badge tone="dark">Interactive model</Badge>}
-      />
-      <div className="grid gap-6 xl:grid-cols-[300px_1fr]">
-        <div className="space-y-4">
-          <div>
-            <div className="mb-1 text-xs font-medium text-muted">1. Region</div>
-            <Select
-              value={region}
-              onChange={(v) => {
-                setRegion(v)
-                setGrowthPct(null)
-              }}
-              options={REGIONS.map((r) => ({ value: r.id, label: r.name }))}
-              className="w-full"
-            />
-            <div className="mt-1 text-[11px] text-muted">
-              {fmtNum(base.used)} / {fmtNum(base.provisioned)} units used · lead time {base.leadTime} mo
-            </div>
-          </div>
-          <Slider label="2. Demand change today" value={demandAdj * 100} min={-30} max={50} step={1} fmt={(v) => `${v > 0 ? '+' : ''}${v}%`} onChange={(v) => setDemandAdj(v / 100)} hint="Step change, e.g. new launch or migration" />
-          <Slider label="3. Monthly growth rate" value={+(growth * 100).toFixed(1)} min={-2} max={10} step={0.1} fmt={(v) => `${v.toFixed(1)}%/mo`} onChange={setGrowthPct} hint={`Baseline ${fmtPct(base.growth, 1)}/mo from trailing trend`} />
-          <Slider label="Capacity threshold" value={threshold * 100} min={70} max={95} step={1} fmt={(v) => `${v}%`} onChange={(v) => setThreshold(v / 100)} hint="Aggregate planning ceiling (see AZ failover check below for N+1)" />
-          <div>
-            <div className="mb-1 text-xs font-medium text-muted">Horizon</div>
-            <Segmented value={String(horizon)} onChange={(v) => setHorizon(Number(v))} options={[{ value: '6', label: '6 mo' }, { value: '12', label: '12 mo' }, { value: '18', label: '18 mo' }]} />
-          </div>
-          <label className="flex cursor-pointer items-start gap-2 rounded-xl border border-line p-3">
-            <input type="checkbox" checked={optimizeFirst} onChange={(e) => setOptimizeFirst(e.target.checked)} className="mt-0.5 accent-[#e60023]" />
-            <span className="text-sm">
-              <span className="font-medium">Optimize before purchasing</span>
-              <span className="block text-[11px] text-muted">Apply in-region rightsizing first (reclaims {fmtNum(base.reclaimable)} units)</span>
-            </span>
-          </label>
-          <button
-            className="text-xs font-medium text-muted hover:text-ink"
-            onClick={() => {
-              setDemandAdj(0)
-              setGrowthPct(null)
-              setThreshold(CAPACITY_THRESHOLD)
-              setOptimizeFirst(false)
-            }}
-          >
-            Reset to baseline
-          </button>
-        </div>
-
-        <div className="min-w-0 space-y-4">
-          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-            <SimStat label="5. Threshold reached" value={sim.crossMonth === null ? 'Not in 36 mo' : sim.crossMonth === 0 ? 'Already' : fmtDate(addMonths(sim.crossMonth))} sub={sim.crossMonth === null ? '' : sim.crossMonth === 0 ? 'above threshold today' : `in ${sim.crossMonth.toFixed(1)} months`} tone={sim.crossMonth !== null && sim.crossMonth < 6 ? 'red' : undefined} />
-            <SimStat label="Order capacity by" value={sim.orderBy === null ? '—' : sim.orderBy <= 0 ? 'Overdue' : fmtDate(addMonths(sim.orderBy))} sub={`${base.leadTime}-month procurement lead time`} tone={sim.orderBy !== null && sim.orderBy <= 0 ? 'red' : undefined} />
-            <SimStat label="4. Additional capacity" value={`${fmtNum(sim.unitsNeeded)} units`} sub={`to stay ≤${Math.round(threshold * 100)}% at ${horizon} mo`} />
-            <SimStat label="6. Investment required" value={`${fmtUSD(sim.monthlyInvestment)}/mo`} sub={`${fmtUSD(sim.annualInvestment)}/yr at ${fmtUSD(base.unitCost)}/unit`} tone={sim.unitsNeeded > 0 ? 'red' : 'green'} />
-          </div>
-          <div className="h-64">
-            <ResponsiveContainer>
-              <ComposedChart data={sim.series} margin={{ top: 5, right: 5, left: -5, bottom: 0 }}>
-                <CartesianGrid stroke="#f0f0f0" vertical={false} />
-                <XAxis dataKey="month" tickLine={false} axisLine={false} />
-                <YAxis tickFormatter={fmtCompact} tickLine={false} axisLine={false} />
-                <Tooltip content={<ChartTooltip formatter={(v) => `${fmtNum(v)} units`} />} />
-                <Legend iconType="circle" iconSize={8} />
-                <Area type="monotone" dataKey="demand" name="Simulated demand" stroke={CHART.red} fill={CHART.red} fillOpacity={0.08} strokeWidth={2} />
-                <Line type="stepAfter" dataKey="capacity" name={optimizeFirst ? 'Effective supply (after optimization)' : 'Provisioned supply'} stroke={CHART.ink} strokeWidth={2} dot={false} />
-                <Line type="stepAfter" dataKey="threshold" name={`${Math.round(threshold * 100)}% threshold`} stroke={CHART.gray} strokeDasharray="5 4" dot={false} />
-              </ComposedChart>
-            </ResponsiveContainer>
-          </div>
-          <details className="rounded-xl bg-neutral-50 px-3 py-2 text-xs text-ink-2">
-            <summary className="cursor-pointer font-medium">Show calculation</summary>
-            <div className="mt-2 space-y-1 font-mono text-[11px]">
-              <div>start demand = {fmtNum(base.used)} × (1 + {fmtPct(demandAdj, 0)}) = {fmtNum(base.used * (1 + demandAdj))}</div>
-              <div>
-                effective supply = {fmtNum(base.provisioned)} + reclaimed {fmtNum(sim.reclaimed)} = {fmtNum(sim.effectiveCapacity)}
-              </div>
-              <div>
-                months to threshold = ln({threshold} × supply ÷ demand) ÷ ln(1 + {fmtPct(growth, 2)}) = {sim.crossMonth === null ? '> 36' : sim.crossMonth.toFixed(2)}
-              </div>
-              <div>
-                demand at {horizon} mo = {fmtNum(sim.endDemand)}; required = max(0, {fmtNum(sim.endDemand)} ÷ {threshold} − {fmtNum(sim.effectiveCapacity)}) = {fmtNum(sim.unitsNeeded)} units
-              </div>
-              <div>
-                investment = {fmtNum(sim.unitsNeeded)} × {fmtUSD(base.unitCost)} = {fmtUSD(sim.monthlyInvestment)}/mo
-              </div>
-            </div>
-          </details>
-        </div>
+    <Card id="demo-requests" pad={false}>
+      <div className="p-5 pb-3">
+        <h3 className="text-[15px] font-semibold">Capacity requests</h3>
       </div>
-
-      <div className="mt-6 border-t border-line pt-5">
-        <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
-          <h4 className="text-sm font-semibold">What-if scenarios · {reg.name}</h4>
-          <span className="text-xs text-muted">
-            AI growth adds {fmtPct(scenarios[1].growth - scenarios[0].growth, 2)}/mo (AI share {fmtPct(base.aiShare, 0)} of demand) · {horizon}-month horizon
-          </span>
-        </div>
-        <div className="grid gap-4 xl:grid-cols-[1fr_1.2fr]">
-          <div className="grid gap-3 sm:grid-cols-3 xl:grid-cols-1">
-            {scenarios.map((s) => (
-              <div key={s.key} className={cx('rounded-xl border p-3', s.key === 'opt' ? 'border-emerald-200 bg-emerald-50/50' : 'border-line')}>
-                <div className="flex items-center justify-between gap-2">
-                  <div className="text-sm font-medium">{s.name}</div>
-                  {s.key === 'opt' && <Badge tone="green">Recommended</Badge>}
-                </div>
-                <div className="mt-2 grid grid-cols-3 gap-2 text-xs">
-                  <div>
-                    <div className="text-muted">Growth</div>
-                    <div className="tabular font-semibold">{fmtPct(s.growth, 1)}/mo</div>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[820px]">
+          <thead>
+            <tr>
+              <Th className="pl-5">Customer</Th>
+              <Th>Region</Th>
+              <Th className="text-right">Racks</Th>
+              <Th>Need by</Th>
+              <Th>Priority</Th>
+              <Th>Recommendation</Th>
+              <Th className="pr-5">Status</Th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(({ req, d, status }) => (
+              <tr key={req.id} onClick={() => setOpen(req.id)} className="cursor-pointer hover:bg-neutral-50">
+                <Td className="pl-5">
+                  <div className="font-medium">{req.customer}</div>
+                  <div className="text-[11px] text-muted">
+                    {req.cluster} · {req.purpose}
                   </div>
-                  <div>
-                    <div className="text-muted">Threshold hit</div>
-                    <div className="tabular font-semibold">{s.crossMonth === null ? '—' : s.crossMonth === 0 ? 'Now' : `${s.crossMonth.toFixed(1)} mo`}</div>
-                  </div>
-                  <div>
-                    <div className="text-muted">New spend</div>
-                    <div className="tabular font-semibold">{fmtUSD(s.annualInvestment)}/yr</div>
-                  </div>
-                </div>
-                <div className="mt-1 text-[11px] text-muted">
-                  {fmtNum(s.unitsNeeded)} units to buy{s.reclaimed ? ` after reclaiming ${fmtNum(s.reclaimed)}` : ''}
-                </div>
-              </div>
+                </Td>
+                <Td>{regionById(req.region).name}</Td>
+                <Td className="tabular text-right font-semibold">{req.racks}</Td>
+                <Td className="whitespace-nowrap">{fmtDate(req.neededBy)}</Td>
+                <Td>
+                  <Badge tone={req.priority === 'P0' ? 'red' : req.priority === 'P1' ? 'amber' : 'neutral'}>{req.priority}</Badge>
+                </Td>
+                <Td>{status === 'Pending' ? <Badge tone={VERDICT_TONE[d.verdict]}>{VERDICT_LABEL[d.verdict]}</Badge> : <span className="text-xs text-muted">—</span>}</Td>
+                <Td className="pr-5">
+                  <Badge tone={STATUS_TONE[status]}>{status === 'Phased' ? `Phased · ${plan.phasedRacks[req.id] ?? 0} now` : status}</Badge>
+                </Td>
+              </tr>
             ))}
-            <div className="rounded-xl bg-ink p-3 text-xs text-white">
-              <span className="font-semibold">Takeaway: </span>
-              {scenarios[1].annualInvestment - scenarios[2].annualInvestment > 0
-                ? `Optimizing first avoids ${fmtUSD(scenarios[1].annualInvestment - scenarios[2].annualInvestment)}/yr of purchases under accelerated AI growth${scenarios[2].crossMonth !== null && scenarios[1].crossMonth !== null && scenarios[2].crossMonth > scenarios[1].crossMonth ? ` and buys ${(scenarios[2].crossMonth - scenarios[1].crossMonth).toFixed(1)} months of runway for procurement` : ''}.`
-                : `${reg.name} has little reclaimable capacity — optimization alone will not avoid the purchase; prioritize procurement timing or reallocation from other regions.`}
-            </div>
-          </div>
-          <div className="h-72">
-            <ResponsiveContainer>
-              <ComposedChart data={scenarioChart} margin={{ top: 5, right: 5, left: -5, bottom: 0 }}>
-                <CartesianGrid stroke="#f0f0f0" vertical={false} />
-                <XAxis dataKey="month" tickLine={false} axisLine={false} />
-                <YAxis tickFormatter={fmtCompact} tickLine={false} axisLine={false} />
-                <Tooltip content={<ChartTooltip formatter={(v) => `${fmtNum(v)} units`} />} />
-                <Legend iconType="circle" iconSize={8} />
-                <Line type="monotone" dataKey="bau" name="BAU demand" stroke={CHART.ink} strokeWidth={2} dot={false} />
-                <Line type="monotone" dataKey="ai" name="AI-accelerated demand" stroke={CHART.red} strokeWidth={2} dot={false} />
-                <Line type="stepAfter" dataKey="supply" name="Usable supply today" stroke={CHART.gray} strokeDasharray="5 4" dot={false} />
-                <Line type="stepAfter" dataKey="supplyOpt" name="Usable supply after optimization" stroke={CHART.teal} strokeDasharray="5 4" dot={false} />
-              </ComposedChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
+          </tbody>
+        </table>
       </div>
+      <Drawer open={!!sel} onClose={() => setOpen(null)} title={sel ? `${sel.req.customer} · ${sel.req.racks} racks · ${sel.req.cluster} (${regionById(sel.req.region).name})` : ''}>
+        {sel && <RequestDetail req={sel.req} />}
+      </Drawer>
     </Card>
   )
 }
 
-function Slider({ label, value, min, max, step, fmt, onChange, hint }: { label: string; value: number; min: number; max: number; step: number; fmt: (v: number) => string; onChange: (v: number) => void; hint?: string }) {
+function RequestDetail({ req }: { req: CapacityRequest }) {
+  const { plan, decide } = useStore()
+  const d = decideRequest(req, plan)
+  const status = plan.requests[req.id] ?? 'Pending'
+  const primary = (() => {
+    switch (d.verdict) {
+      case 'fits':
+        return { label: 'Approve', run: () => decide(req.id, 'Approved') }
+      case 'order':
+        return { label: `Approve + order ${d.order!.racks} ${genById(d.order!.gen).name} racks`, run: () => decide(req.id, 'Approved', { order: d.order }) }
+      case 'phase':
+        return { label: `Approve ${d.nowRacks} racks now${d.order ? ` + order ${d.order.racks}` : ''}`, run: () => decide(req.id, 'Phased', { order: d.order, nowRacks: d.nowRacks }) }
+      case 'escalate':
+        return { label: 'Escalate for power', run: () => decide(req.id, 'Escalated') }
+      default:
+        return { label: `Defer to ${monthLabel(d.laterDate!)}`, run: () => decide(req.id, 'Deferred') }
+    }
+  })()
+
   return (
-    <div>
-      <div className="mb-1 flex items-center justify-between text-xs">
-        <span className="font-medium text-muted">{label}</span>
-        <span className="tabular font-semibold">{fmt(value)}</span>
+    <div className="space-y-5">
+      <div className="grid grid-cols-3 gap-3">
+        <Stat label="Requested" value={`${req.racks} racks`} />
+        <Stat label="Need by" value={fmtDate(req.neededBy)} />
+        <Stat label="Headroom" value={`${Math.max(0, Math.floor(d.headroom))} racks`} tone={d.headroom < req.racks ? 'red' : 'green'} />
       </div>
-      <input type="range" min={min} max={max} step={step} value={value} onChange={(e) => onChange(Number(e.target.value))} className="w-full accent-[#e60023]" />
-      {hint && <div className="text-[11px] text-muted">{hint}</div>}
+
+      <div className={cx('rounded-xl border p-4', d.verdict === 'fits' || d.verdict === 'order' ? 'border-emerald-200 bg-emerald-50' : d.verdict === 'phase' ? 'border-amber-200 bg-amber-50' : 'border-pin/30 bg-pin-soft')}>
+        <div className="text-base font-semibold">{VERDICT_LABEL[d.verdict]}</div>
+        <ul className="mt-2 space-y-1.5 text-sm text-ink-2">
+          {d.reasons.map((r) => (
+            <li key={r} className="flex gap-2">
+              <span className="mt-2 h-1 w-1 shrink-0 rounded-full bg-ink" />
+              {r}
+            </li>
+          ))}
+        </ul>
+      </div>
+
+      <div className="rounded-xl border border-line">
+        <div className="flex items-center gap-1.5 border-b border-line px-3 py-2 text-sm font-medium">
+          <Calculator size={14} /> Math
+        </div>
+        <table className="w-full text-xs">
+          <tbody>
+            {d.calc.map((c) => (
+              <tr key={c.label} className="border-b border-line/70 last:border-0">
+                <td className="px-3 py-2 font-medium">{c.label}</td>
+                <td className="px-3 py-2 text-muted">{c.formula}</td>
+                <td className="tabular whitespace-nowrap px-3 py-2 text-right font-semibold">{c.result}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="flex flex-wrap gap-2 border-t border-line pt-4">
+        {status === 'Pending' ? (
+          <>
+            <Button variant="primary" onClick={primary.run}>
+              <Check size={14} /> {primary.label}
+            </Button>
+            {d.verdict !== 'defer' && <Button onClick={() => decide(req.id, 'Deferred')}>Defer</Button>}
+            <Button variant="ghost" onClick={() => decide(req.id, 'Rejected')}>
+              <X size={14} /> Reject
+            </Button>
+          </>
+        ) : (
+          <>
+            <span className="self-center text-sm text-muted">{status}.</span>
+            <Button variant="ghost" onClick={() => decide(req.id, 'Pending')}>
+              Undo
+            </Button>
+          </>
+        )}
+      </div>
     </div>
   )
 }
 
-function SimStat({ label, value, sub, tone }: { label: string; value: string; sub?: string; tone?: 'red' | 'green' }) {
+function Stat({ label, value, sub, tone }: { label: string; value: string; sub?: string; tone?: 'red' | 'green' | 'amber' }) {
   return (
-    <div className={cx('rounded-xl border p-3', tone === 'red' ? 'border-pin/30 bg-pin-soft' : tone === 'green' ? 'border-emerald-200 bg-emerald-50' : 'border-line')}>
+    <div className={cx('rounded-xl border p-3', tone === 'red' ? 'border-pin/30 bg-pin-soft' : tone === 'green' ? 'border-emerald-200 bg-emerald-50' : tone === 'amber' ? 'border-amber-200 bg-amber-50' : 'border-line')}>
       <div className="text-[11px] font-medium text-muted">{label}</div>
       <div className={cx('tabular mt-1 text-lg font-semibold leading-tight', tone === 'red' && 'text-pin-dark')}>{value}</div>
       {sub && <div className="text-[11px] text-muted">{sub}</div>}
@@ -323,94 +171,155 @@ function SimStat({ label, value, sub, tone }: { label: string; value: string; su
   )
 }
 
-type SortKey = 'region' | 'workload' | 'provisioned' | 'util' | 'headroom' | 'forecast'
+/* ---------------- Order timeline ---------------- */
 
-function Inventory({ filters }: { filters: Filters }) {
-  const { can } = useStore()
-  const sensitive = can('viewSensitive')
-  const [q, setQ] = useState('')
-  const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: 'util', dir: -1 })
-  const rows = useMemo(() => {
-    const list = filterRows(filters).map((r) => {
-      const f6 = forecastUsed(r, 6)
-      return { ...r, util: r.used / r.provisioned, f6, headroom: (r.provisioned - f6) / r.provisioned }
-    })
-    const s = q.toLowerCase()
-    const filtered = s ? list.filter((r) => [regionById(r.region).name, workloadById(r.workload).name, r.hardware, r.az, r.type].join(' ').toLowerCase().includes(s)) : list
-    const val = (r: (typeof list)[number]) => (sort.key === 'region' ? regionById(r.region).name : sort.key === 'workload' ? workloadById(r.workload).short : sort.key === 'provisioned' ? r.provisioned : sort.key === 'util' ? r.util : sort.key === 'headroom' ? r.headroom : r.f6 / r.provisioned)
-    return filtered.sort((a, b) => {
-      const va = val(a)
-      const vb = val(b)
-      return (typeof va === 'string' ? va.localeCompare(vb as string) : (va as number) - (vb as number)) * sort.dir
-    })
-  }, [filters, q, sort])
-  const th = (key: SortKey, label: string, cls?: string) => (
-    <Th className={cls} active={sort.key === key} onClick={() => setSort((s) => ({ key, dir: s.key === key ? ((-s.dir) as 1 | -1) : -1 }))}>
-      {label} {sort.key === key ? (sort.dir === 1 ? '↑' : '↓') : ''}
-    </Th>
-  )
+function OrderTimeline() {
+  const { plan, region: filterRegion } = useStore()
+  const [region, setRegion] = useState(filterRegion === 'all' ? 'westus3' : filterRegion)
+  const reg = regionById(region)
+  const [growthPct, setGrowthPct] = useState<number | null>(null)
+  const [extra, setExtra] = useState(0)
+  const [horizon, setHorizon] = useState(12)
+  const growth = growthPct === null ? reg.growth : growthPct / 100
+  const bp = useMemo(() => buildPlan(region, plan, { horizon, growth, extra }), [region, plan, horizon, growth, extra])
+  const data = bp.pts
+  const near = (d: Date | null) => (d ? data.reduce((b, p) => (Math.abs(p.date.getTime() - d.getTime()) < Math.abs(b.date.getTime() - d.getTime()) ? p : b), data[0]).month : null)
+
   return (
-    <Card pad={false}>
-      <div className="flex flex-wrap items-center justify-between gap-3 p-5 pb-3">
-        <div>
-          <h3 className="text-[15px] font-semibold">Infrastructure inventory</h3>
-          <p className="text-xs text-muted">{rows.length} capacity pools · compute, storage and networking · click headers to sort</p>
+    <Card id="demo-order">
+      <CardTitle
+        title={
+          <span className="flex items-center gap-2">
+            <Clock size={16} className="text-pin" /> When do we order and dock?
+          </span>
+        }
+      />
+      <div className="grid gap-6 xl:grid-cols-[240px_1fr]">
+        <div className="space-y-4">
+          <Select
+            value={region}
+            onChange={(v) => {
+              setRegion(v)
+              setGrowthPct(null)
+            }}
+            options={REGIONS.map((r) => ({ value: r.id, label: r.name }))}
+            className="w-full"
+          />
+          <Slider label="Monthly growth" value={+(growth * 100).toFixed(1)} min={0} max={6} step={0.1} fmt={(v) => `${v.toFixed(1)}%`} onChange={setGrowthPct} />
+          <Slider label="Extra demand" value={extra} min={0} max={200} step={5} fmt={(v) => `+${v} racks`} onChange={setExtra} />
+          <Segmented value={String(horizon)} onChange={(v) => setHorizon(Number(v))} options={[{ value: '12', label: '12 mo' }, { value: '18', label: '18 mo' }, { value: '24', label: '24 mo' }]} />
         </div>
-        <div className="flex items-center gap-2">
-          {!sensitive && (
-            <Badge tone="amber">
-              <Lock size={10} /> AZ & hardware redacted for your role
-            </Badge>
-          )}
-          <MeasuredTag />
-          <label className="flex items-center gap-1.5 rounded-full border border-line px-3 py-1.5">
-            <Search size={13} className="text-muted" />
-            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search inventory" className="w-40 bg-transparent text-sm outline-none" />
-          </label>
+        <div className="min-w-0 space-y-4">
+          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+            <Stat label="Hits 75%" value={bp.liveBy ? monthLabel(bp.liveBy) : '—'} tone={bp.liveBy && bp.over! <= 6 ? 'red' : undefined} />
+            <Stat label="Order by" value={bp.orderBy ? (bp.overdue ? 'Overdue' : fmtDate(bp.orderBy)) : '—'} sub={bp.dockBy ? `dock ${fmtDate(bp.dockBy)}` : undefined} tone={bp.overdue ? 'red' : bp.orderBy ? 'amber' : undefined} />
+            <Stat label="Build" value={bp.racks ? `${bp.racks} ${genById(bp.gen).name} racks` : '—'} sub={bp.racks ? `${fmtUSD(bp.capex)} · ${(bp.kwNeeded / 1000).toFixed(2)} MW` : undefined} />
+            <Stat
+              label={bp.powerShortRacks ? 'Power' : 'Write-off at Gen8 EOL'}
+              value={bp.powerShortRacks ? `${bp.powerShortRacks} racks short` : bp.writeOffAtEol ? fmtUSD(bp.writeOffAtEol) : '—'}
+              sub={bp.powerShortRacks ? 'escalate' : bp.gen === 'gen8' && bp.racks ? `Gen11 GA ${monthLabel(gen11Ga(plan))}` : undefined}
+              tone={bp.powerShortRacks ? 'red' : bp.writeOffAtEol ? 'amber' : undefined}
+            />
+          </div>
+          <div className="h-64">
+            <ResponsiveContainer>
+              <ComposedChart data={data} margin={{ top: 15, right: 10, left: 0, bottom: 0 }}>
+                <CartesianGrid stroke="#f0f0f0" vertical={false} />
+                <XAxis dataKey="month" tickLine={false} axisLine={false} />
+                <YAxis tickLine={false} axisLine={false} />
+                <Tooltip content={<ChartTooltip formatter={(v) => `${Math.round(v).toLocaleString()} racks`} />} />
+                <Legend iconType="circle" iconSize={8} />
+                {GENS.map((g) => (
+                  <Area key={g.id} type="stepAfter" dataKey={g.id} name={g.name} stackId="s" stroke={g.color} fill={g.color} fillOpacity={g.id === 'gen11' ? 0.45 : 0.6} />
+                ))}
+                <Line type="stepAfter" dataKey="usable" name={`${PLANNING_THRESHOLD * 100}% line`} stroke={CHART.ink} strokeDasharray="5 4" dot={false} />
+                <Line type="monotone" dataKey="demand" name="Racks in use" stroke={CHART.red} strokeWidth={2.5} dot={false} />
+                {[
+                  { d: bp.orderBy, label: 'Order' },
+                  { d: bp.liveBy, label: 'Live' },
+                ].map((m) => {
+                  const x = near(m.d)
+                  return x && m.d! >= data[0].date ? <ReferenceLine key={m.label} x={x} stroke={CHART.red} strokeOpacity={0.5} label={{ value: m.label, position: 'top', fontSize: 10, fill: CHART.red }} /> : null
+                })}
+              </ComposedChart>
+            </ResponsiveContainer>
+          </div>
         </div>
-      </div>
-      <div className="max-h-[520px] overflow-auto">
-        <table className="w-full min-w-[1100px]">
-          <thead className="sticky top-0 z-10 bg-white">
-            <tr>
-              {th('region', 'Region', 'pl-5')}
-              <Th>AZ</Th>
-              {th('workload', 'Workload')}
-              <Th>Type</Th>
-              <Th>Instance / hardware</Th>
-              {th('provisioned', 'Provisioned', 'text-right')}
-              <Th className="text-right">Reserved</Th>
-              <Th className="text-right">Available</Th>
-              {th('util', 'Utilization')}
-              {th('forecast', 'Forecast +6 mo', 'text-right')}
-              {th('headroom', 'Headroom +6 mo', 'pr-5 text-right')}
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r) => (
-              <tr key={r.id} className="hover:bg-neutral-50">
-                <Td className="pl-5 font-medium">{regionById(r.region).name}</Td>
-                <Td className="whitespace-nowrap text-muted">{sensitive ? r.az : '•••'}</Td>
-                <Td>{workloadById(r.workload).short}</Td>
-                <Td>
-                  <Badge tone={r.type === 'compute' ? 'dark' : r.type === 'storage' ? 'blue' : 'neutral'}>{r.type}</Badge>
-                </Td>
-                <Td className="text-muted">{sensitive ? r.hardware : 'Restricted'}</Td>
-                <Td className="tabular text-right">
-                  {fmtNum(r.provisioned)} <span className="text-[11px] text-muted">{r.unit}</span>
-                </Td>
-                <Td className="tabular text-right">{fmtNum(r.reserved)}</Td>
-                <Td className="tabular text-right">{fmtNum(r.provisioned - r.used)}</Td>
-                <Td>
-                  <UtilBar value={r.util} />
-                </Td>
-                <Td className="tabular text-right">{fmtNum(r.f6)}</Td>
-                <Td className={cx('tabular pr-5 text-right font-medium', r.headroom < 0 ? 'text-pin' : r.headroom < 1 - CAPACITY_THRESHOLD ? 'text-amber-700' : '')}>{fmtPct(r.headroom, 0)}</Td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
       </div>
     </Card>
+  )
+}
+
+function Slider({ label, value, min, max, step, fmt, onChange }: { label: string; value: number; min: number; max: number; step: number; fmt: (v: number) => string; onChange: (v: number) => void }) {
+  return (
+    <div>
+      <div className="mb-1 flex items-center justify-between text-xs">
+        <span className="font-medium text-muted">{label}</span>
+        <span className="tabular font-semibold">{fmt(value)}</span>
+      </div>
+      <input type="range" min={min} max={max} step={step} value={value} onChange={(e) => onChange(Number(e.target.value))} className="w-full accent-[#e60023]" />
+    </div>
+  )
+}
+
+/* ---------------- Rebalance ---------------- */
+
+function Rebalance() {
+  const { plan, region, addMove, removeMove } = useStore()
+  const options = rebalanceOptions(plan, region)
+  return (
+    <Card id="demo-rebalance">
+      <CardTitle
+        title={
+          <span className="flex items-center gap-2">
+            <Shuffle size={16} /> Rebalance racks
+          </span>
+        }
+      />
+      <div className="space-y-3">
+        {options.map((o) => {
+          const planned = plan.moves.some((m) => m.id === o.move.id)
+          return (
+            <div key={o.move.id} className="flex flex-wrap items-center gap-4 rounded-xl border border-line p-3">
+              <div className="min-w-[200px] flex-1 text-sm font-medium">
+                <span className="flex items-center gap-2">
+                  {regionById(o.from).name} <ArrowRight size={14} /> {regionById(o.to).name}
+                </span>
+                <span className="text-xs font-normal text-muted">lowest-utilization Gen8 racks</span>
+              </div>
+              <Mini label="Racks" value={String(o.racks)} />
+              <Mini label="Live" value={monthLabel(o.live)} />
+              <div className="w-36 text-right">
+                {planned ? (
+                  <Button size="sm" variant="ghost" onClick={() => removeMove(o.move.id)}>
+                    Planned · undo
+                  </Button>
+                ) : (
+                  <Button size="sm" variant="dark" onClick={() => addMove(o.move)}>
+                    Plan move
+                  </Button>
+                )}
+              </div>
+            </div>
+          )
+        })}
+        {!options.length && <div className="py-4 text-center text-sm text-muted">No rebalancing opportunities.</div>}
+        {plan.moves.length > 0 && (
+          <div className="pt-1 text-xs text-muted">
+            Planned: {plan.moves.map((m) => `${m.racks} racks ${regionById(m.fromRegion).name} → ${regionById(m.toRegion).name} (${monthLabel(toDate(m.live))})`).join(' · ')}
+          </div>
+        )}
+      </div>
+    </Card>
+  )
+}
+
+function Mini({ label, value, sub }: { label: string; value: string; sub?: string }) {
+  return (
+    <div className="w-24">
+      <div className="text-[11px] text-muted">{label}</div>
+      <div className="tabular text-sm font-semibold">{value}</div>
+      {sub && <div className="text-[11px] text-muted">{sub}</div>}
+    </div>
   )
 }
